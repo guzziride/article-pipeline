@@ -1,0 +1,11 @@
+langgraph
+langchain-openai
+langchain-google-genai
+langchain-groq
+langchain-community
+langchain-tavily
+tavily-python
+feedparser
+python-dotenv
+fastapi
+uvicorn
