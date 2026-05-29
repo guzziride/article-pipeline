@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+drafts.db
+drafts.db-shm
+drafts.db-wal
+.env

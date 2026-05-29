@@ -1,0 +1,11 @@
+services:
+  article-pipeline:
+    build: .
+    container_name: article-pipeline
+    ports:
+      - "3010:3010"
+    env_file:
+      - .env
+    volumes:
+      - ./drafts.db:/app/drafts.db
+    restart: always
