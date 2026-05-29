@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict, Annotated, Uni
 
 from dotenv import load_dotenv
 import feedparser
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI

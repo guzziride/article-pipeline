@@ -3,6 +3,7 @@ langchain-openai
 langchain-google-genai
 langchain-groq
 langchain-community
+langchain-ollama
 langchain-tavily
 tavily-python
 feedparser

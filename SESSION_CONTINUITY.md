@@ -37,6 +37,12 @@ Use this file to resume quickly after context loss.
 9. Added cloud-hosted Ollama support:
    - Support for `OLLAMA_API_KEY` via Authorization headers in `graph.py`.
    - Dynamic model dropdowns in UI driven by `OLLAMA_MODEL_OPTIONS` in `.env`.
+10. Repository Management:
+    - Initialized Git and pushed to GitHub: `https://github.com/guzziride/article-pipeline`.
+11. Dockerization:
+    - Added `Dockerfile` and `docker-compose.yml`.
+    - Fixed `ImportError` by adding `langchain-ollama` and updating `graph.py`.
+    - Application now runs in Docker at `http://localhost:3010` with persistence.
 
 ## Important Behavior Now
 

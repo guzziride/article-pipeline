@@ -161,7 +161,17 @@ Env keys in active use:
 - `OLLAMA_API_KEY` added for cloud-hosted Ollama providers (e.g., `https://ollama.com`).
 - `OLLAMA_MODEL_OPTIONS` (comma-separated list) now dynamically populates the UI model selection dropdown.
 
-## 10) Current Known Issues / Open Items
+## 10) Deployment and Infrastructure
+
+- **GitHub**: `https://github.com/guzziride/article-pipeline`
+- **Docker**: 
+  - `Dockerfile` (Python 3.12-slim)
+  - `docker-compose.yml` (Handles persistence and environment)
+  - Persistence: Local `drafts.db` volume-mounted to `/app/drafts.db`
+- **Dependencies**:
+  - Added `langchain-ollama` for modern Ollama integration.
+
+## 11) Current Known Issues / Open Items
 
 
 - Latest user report: "full scan and all units failed" (not yet triaged in this session).
