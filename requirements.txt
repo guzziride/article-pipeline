@@ -1,11 +1,10 @@
 langgraph
+langgraph-checkpoint-sqlite
+apscheduler
 langchain-openai
 langchain-google-genai
 langchain-groq
-langchain-community
 langchain-ollama
-langchain-tavily
-tavily-python
 feedparser
 python-dotenv
 fastapi

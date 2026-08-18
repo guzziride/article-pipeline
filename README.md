@@ -1,11 +1,12 @@
 # Article Pipeline (LangGraph + HITL)
 
-This project builds a 4-node LangGraph pipeline for technical-news curation and LinkedIn drafting:
+This project builds a LangGraph pipeline for technical-news curation and LinkedIn drafting:
 
-1. **Scout** (Tavily): finds current tech news and stores them in `raw_articles`.
-2. **Analyst** (default Gemini 2.0 Flash): scores and curates the top 3 items into `curated_candidates`.
+1. **Scout** (RSS + Google News RSS fallback): finds current tech news and stores them in `raw_articles`.
+2. **Analyst**: scores and curates top items into `curated_candidates`.
 3. **Approval** (`interrupt()`): surfaces candidates and waits for your `selected_article_id`.
-4. **Author** (default GPT-4o): drafts a polished LinkedIn post into `final_draft`.
+4. **Author**: drafts a polished LinkedIn post into `final_draft`.
+5. **Edit approval** (`interrupt()`): publish, edit, pick another article, or finish.
 
 It uses a `MemorySaver` checkpointer so you can stop at the interrupt and resume later with a selected article ID.
 Scouting enforces recency with configurable settings:
@@ -25,8 +26,6 @@ pip install -r requirements.txt
 Create `.env` in the project root.
 
 ```dotenv
-# Required for scraping
-TAVILY_API_KEY=...
 ARTICLE_PIPELINE_DEFAULT_TOPIC=latest tech news on MCP, agentic workflows, and SaaS AI infrastructure
 MAX_ARTICLE_AGE_DAYS=14
 ALLOW_UNDATED_ARTICLES=true
@@ -49,7 +48,7 @@ OLLAMA_MODEL=llama3.1
 ```
 
 Notes:
-- `TAVILY_API_KEY` is required.
+- Scout uses RSS and Google News RSS fallback; no search API key is required.
 - Gemini calls need `GOOGLE_API_KEY`.
 - OpenAI calls need `OPENAI_API_KEY`.
 - Groq calls need `GROQ_API_KEY`.

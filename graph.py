@@ -2,11 +2,13 @@ import os
 import json
 import re
 import operator
-import warnings
-import urllib.error
+import ipaddress
+import socket
+import sqlite3
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from time import mktime
 from typing import Any, Dict, List, Literal, Optional, TypedDict, Annotated, Union
 
@@ -16,14 +18,16 @@ from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 import progress as progress_tracker
+import feed_cache
 from settings import (
     get_allow_undated_articles,
     get_default_topic,
+    get_factuality_check_enabled,
     get_max_article_age_days,
     get_rss_max_items_per_feed,
     get_scout_max_total_articles,
@@ -38,30 +42,37 @@ DOMAIN_INGESTION_MAP: Dict[str, Dict[str, str]] = {
     "bair.berkeley.edu": {"mode": "rss", "endpoint": "https://bair.berkeley.edu/blog/feed/"},
     "deepmind.google": {"mode": "rss", "endpoint": "https://deepmind.google/blog/rss.xml"},
     "openai.com": {"mode": "rss", "endpoint": "https://openai.com/news/rss.xml"},
-    "anthropic.com": {"mode": "tavily", "endpoint": ""},
+    "anthropic.com": {"mode": "google_news", "endpoint": ""},
     "infoq.com": {"mode": "rss", "endpoint": "https://feed.infoq.com/"},
     "modelcontextprotocol.io": {"mode": "rss", "endpoint": "https://blog.modelcontextprotocol.io/index.xml"},
     "langchain.com": {"mode": "rss", "endpoint": "https://blog.langchain.dev/rss/"},
     "github.blog": {"mode": "rss", "endpoint": "https://github.blog/feed/"},
     "microsoft.com": {"mode": "rss", "endpoint": "https://www.microsoft.com/en-us/research/blog/feed/"},
-    "a16z.com": {"mode": "tavily", "endpoint": ""},
+    "a16z.com": {"mode": "google_news", "endpoint": ""},
     "stratechery.com": {"mode": "rss", "endpoint": "https://stratechery.com/feed/"},
     "theinformation.com": {"mode": "rss", "endpoint": "https://www.theinformation.com/feed"},
-    "venturebeat.com": {"mode": "tavily", "endpoint": ""},
+    "venturebeat.com": {"mode": "rss", "endpoint": "https://venturebeat.com/category/ai/feed"},
     "techcrunch.com": {"mode": "rss", "endpoint": "https://techcrunch.com/feed/"},
     "news.ycombinator.com": {"mode": "rss", "endpoint": "https://news.ycombinator.com/rss"},
-    "tldr.tech": {"mode": "tavily", "endpoint": ""},
-    "alphasignals.com": {"mode": "tavily", "endpoint": ""},
+    "tldr.tech": {"mode": "google_news", "endpoint": ""},
+    "alphasignals.com": {"mode": "google_news", "endpoint": ""},
     "importai.substack.com": {"mode": "rss", "endpoint": "https://importai.substack.com/feed"},
     "latent.space": {"mode": "rss", "endpoint": "https://www.latent.space/feed"},
     "thelogic.co": {"mode": "rss", "endpoint": "https://thelogic.co/feed/"},
     "bctechassociation.org": {"mode": "rss", "endpoint": "https://wearebctech.com/feed/"},
+    "searchengineland.com": {"mode": "rss", "endpoint": "https://searchengineland.com/feed"},
+    "searchenginejournal.com": {"mode": "rss", "endpoint": "https://www.searchenginejournal.com/feed/"},
+    "marketingbrew.com": {"mode": "rss", "endpoint": "https://www.marketingbrew.com/feed.xml"},
+    "kopp-online-marketing.com": {"mode": "rss", "endpoint": "https://www.kopp-online-marketing.com/feed/"},
+    "semrush.com": {"mode": "rss", "endpoint": "https://www.semrush.com/blog/feed/"},
+    "uberall.com": {"mode": "google_news", "endpoint": ""},
 }
 
 ANALYST_MAX_ARTICLES = 20
 ANALYST_MAX_PICKS = 20
 ANALYST_SUMMARY_MAX_CHARS = 260
 AUTHOR_SUMMARY_MAX_CHARS = 1600
+DRAFT_REVIEW_ACTIONS = {"publish", "edit", "pick_another", "done"}
 
 
 class Article(TypedDict):
@@ -113,8 +124,13 @@ class AnalystPick(BaseModel):
     relevance_score: float = Field(
         ge=0.0,
         le=10.0,
-        description="Relevance score for a CTO/PhD audience",
+        description="Weighted relevance score (Contrarian Value 0.30, Technical Depth 0.25, Debate Potential 0.20, Timeliness 0.15, Source Credibility 0.10)",
     )
+    contrarian_value: float = Field(ge=0.0, le=10.0, description="Does it challenge assumptions or reveal non-obvious truths?")
+    technical_depth: float = Field(ge=0.0, le=10.0, description="Does it contain actionable implementation details, not just market commentary?")
+    debate_potential: float = Field(ge=0.0, le=10.0, description="Would a post about this article generate meaningful discussion?")
+    timeliness: float = Field(ge=0.0, le=10.0, description="Will this still be relevant in 3-5 days, or is it breaking news that fades fast?")
+    source_credibility: float = Field(ge=0.0, le=10.0, description="Is this from a source known for technical rigor?")
 
 
 class AnalystResponse(BaseModel):
@@ -134,16 +150,22 @@ def _extract_json_payload(text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise
-        return json.loads(cleaned[start : end + 1])
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start : end + 1])
+        # Try array-wrapping for list responses
+        start = cleaned.find("[")
+        end = cleaned.rfind("]")
+        if start >= 0 and end > start:
+            array_data = json.loads(cleaned[start : end + 1])
+            return {"picks": array_data}
+        raise
 
 
 def _invoke_analyst_structured(analyst_llm: Any, prompt: str) -> AnalystResponse:
     try:
         structured_llm = analyst_llm.with_structured_output(AnalystResponse)
         return structured_llm.invoke(prompt)
-    except NotImplementedError:
+    except Exception:
         fallback_prompt = "\n\n".join(
             [
                 prompt,
@@ -160,18 +182,20 @@ def _invoke_analyst_structured(analyst_llm: Any, prompt: str) -> AnalystResponse
 def _get_chat_model(provider: str, role: str, model_override: Optional[str] = None):
     provider = provider.lower().strip()
     chosen_model = (model_override or "").strip() or None
+    request_timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
+    max_retries = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
     if provider == "gemini":
         model = chosen_model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-        return ChatGoogleGenerativeAI(model=model, temperature=0.2)
+        return ChatGoogleGenerativeAI(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "openai":
         model = chosen_model or os.getenv("OPENAI_MODEL", "gpt-4o")
-        return ChatOpenAI(model=model, temperature=0.2)
+        return ChatOpenAI(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "groq":
         model = chosen_model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        return ChatGroq(model=model, temperature=0.2)
+        return ChatGroq(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "ollama":
         model = chosen_model or os.getenv("OLLAMA_MODEL", "llama3.1")
@@ -185,6 +209,7 @@ def _get_chat_model(provider: str, role: str, model_override: Optional[str] = No
             base_url=base_url,
             temperature=0.2,
             headers=headers if headers else None,
+            timeout=request_timeout,
         )
 
     raise ValueError(f"Unsupported provider for {role}: {provider}")
@@ -196,6 +221,74 @@ def _default_include_domains() -> List[str]:
         return []
     values = [part.strip().lower() for part in raw.split(",")]
     return [item for item in values if item]
+
+
+def _topic_keywords(topic: str) -> List[str]:
+    raw = (topic or "").strip()
+    if not raw:
+        return []
+    text = raw.lower()
+    for ch in ",.!?;:•–—()[]\"'":
+        text = text.replace(ch, " ")
+    stop_words = {
+        "and", "the", "for", "with", "from", "has", "had", "was", "are",
+        "that", "this", "have", "been", "their", "said", "each", "which",
+        "how", "what", "now", "about", "get", "use", "all", "not", "but",
+        "can", "will", "just", "also", "than", "only", "other", "some",
+        "may", "its", "your", "one", "two", "three", "last", "first",
+        "next", "year", "years", "day", "days", "week", "month", "time",
+        "like", "know", "make", "way", "take", "come", "see", "go",
+        "want", "think", "look", "find", "give", "tell", "ask", "work",
+        "call", "try", "need", "feel", "seem", "turn", "hand", "put",
+        "here", "there", "when", "where", "who", "why", "too", "very",
+        "still", "well", "own", "out", "over", "again", "many", "much",
+        "then", "them", "these", "those", "him", "her", "his", "he",
+        "it", "we", "they", "our", "my", "me", "us", "a", "an", "on",
+        "in", "at", "to", "of", "by", "up", "so", "as", "if", "or",
+        "be", "is", "am", "do", "does", "did", "would", "should", "could",
+    }
+    tokens = []
+    for word in text.split():
+        w = word.strip()
+        if len(w) <= 1:
+            continue
+        if w in stop_words:
+            continue
+        tokens.append(w)
+    return tokens
+
+
+def _topic_matches(keywords: List[str], title: str, summary: str) -> bool:
+    if not keywords:
+        return True
+    hay = f"{title} {summary}".lower()
+    return any(re.search(rf"\b{re.escape(kw)}\b", hay) for kw in keywords)
+
+
+def _topic_search_terms(topic: str, max_terms: int = 14) -> List[str]:
+    generic_words = {
+        "act", "strategist", "scan", "news", "regarding", "last", "hours",
+        "goal", "surface", "articles", "article", "high", "impact", "signal",
+        "meaning", "discuss", "significant", "shifts", "prioritizing", "invite",
+        "professional", "debate", "tech", "savvy", "from",
+    }
+    terms: List[str] = []
+    seen: set[str] = set()
+    for keyword in _topic_keywords(topic):
+        if keyword in generic_words or keyword in seen:
+            continue
+        seen.add(keyword)
+        terms.append(keyword)
+        if len(terms) >= max_terms:
+            break
+    return terms
+
+
+def _build_google_news_rss_url(domain: str, topic: str, max_age_days: int) -> str:
+    normalized_domain = _normalize_domain(domain)
+    query_parts = [f"site:{normalized_domain}", f"when:{max_age_days}d"]
+    query = quote_plus(" ".join(query_parts))
+    return f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -270,53 +363,6 @@ def _extract_date_from_text(text: str) -> tuple[Optional[datetime], str]:
     return None, ""
 
 
-def _extract_published_at(item: Dict[str, Any]) -> tuple[Optional[datetime], str, Dict[str, str]]:
-    raw_date_fields: Dict[str, str] = {}
-    date_keys = [
-        "published_date",
-        "published_at",
-        "publishedAt",
-        "date",
-        "published",
-        "pub_date",
-        "created_at",
-        "updated_at",
-        "timestamp",
-    ]
-
-    for key in date_keys:
-        candidate = item.get(key)
-        if candidate is None:
-            continue
-        raw_date_fields[f"item.{key}"] = str(candidate)[:120]
-        parsed = _parse_datetime(candidate)
-        if parsed:
-            return parsed.astimezone(timezone.utc), f"item.{key}", raw_date_fields
-
-    metadata = item.get("metadata")
-    if isinstance(metadata, dict):
-        for key in date_keys:
-            candidate = metadata.get(key)
-            if candidate is None:
-                continue
-            raw_date_fields[f"metadata.{key}"] = str(candidate)[:120]
-            parsed = _parse_datetime(candidate)
-            if parsed:
-                return parsed.astimezone(timezone.utc), f"metadata.{key}", raw_date_fields
-
-    for field in ["title", "content", "url"]:
-        value = str(item.get(field, "") or "")
-        if not value.strip():
-            continue
-        parsed, matched_text = _extract_date_from_text(value)
-        if parsed:
-            if matched_text:
-                raw_date_fields[f"{field}.matched_text"] = matched_text
-            return parsed.astimezone(timezone.utc), f"{field}.text_scan", raw_date_fields
-
-    return None, "", raw_date_fields
-
-
 def _prepare_articles_for_analyst(articles: List[Article], max_items: int = ANALYST_MAX_ARTICLES) -> List[Article]:
     def _sort_key(article: Article) -> tuple[int, float]:
         raw_date = article.get("published_at", "")
@@ -354,6 +400,37 @@ def _extract_domain(url: str) -> str:
     return host
 
 
+def _is_public_http_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return False
+
+    try:
+        addresses = socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError, ValueError):
+        return False
+
+    for address in addresses:
+        ip_text = address[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return True
+
+
 def _normalize_domain(value: str) -> str:
     raw = (value or "").strip().lower()
     if not raw:
@@ -365,56 +442,12 @@ def _normalize_domain(value: str) -> str:
     return host
 
 
-def _build_tavily_search_tool(max_results: int = 8):
-    try:
-        from langchain_tavily import TavilySearch
-
-        return TavilySearch(
-            max_results=max_results,
-            search_depth="advanced",
-            include_answer=False,
-        ), "langchain_tavily"
-    except Exception:
-        from langchain_community.tools.tavily_search import TavilySearchResults
-
-        warnings.filterwarnings(
-            "ignore",
-            category=DeprecationWarning,
-            module=r"langchain_community\.tools\.tavily_search",
-        )
-        return TavilySearchResults(
-            max_results=max_results,
-            search_depth="advanced",
-            include_answer=False,
-        ), "langchain_community"
-
-
-def _invoke_tavily_search(search_tool: Any, query: str, include_domains: Optional[List[str]] = None) -> Any:
-    payload: Dict[str, Any] = {"query": query}
-    if include_domains:
-        payload["include_domains"] = include_domains
-
-    attempts = [
-        payload,
-        {"query": query},
-        query,
-    ]
-    last_error: Optional[Exception] = None
-    for attempt in attempts:
-        try:
-            return search_tool.invoke(attempt)
-        except Exception as exc:
-            last_error = exc
-            continue
-    raise RuntimeError(f"Tavily invocation failed for query '{query}': {last_error}")
-
-
 def _resolve_domain_route(domain: str) -> Dict[str, str]:
     normalized = _normalize_domain(domain)
     explicit = DOMAIN_INGESTION_MAP.get(normalized)
     if explicit:
         return explicit
-    return {"mode": "tavily", "endpoint": ""}
+    return {"mode": "google_news", "endpoint": ""}
 
 
 def _datetime_from_struct_time(value: Any) -> Optional[datetime]:
@@ -462,7 +495,11 @@ def _normalize_rss_entries(
     feed_url: str,
     parsed_feed: Any,
     start_id: int,
+    topic: str = "",
+    ingestion_mode: str = "rss",
 ) -> tuple[List[Article], List[Dict[str, Any]], Dict[str, Any]]:
+    keywords = _topic_keywords(topic)
+    has_topic = bool(keywords)
     entries = getattr(parsed_feed, "entries", []) or []
     max_items_per_feed = get_rss_max_items_per_feed()
     entries = entries[:max_items_per_feed]
@@ -477,6 +514,7 @@ def _normalize_rss_entries(
     dropped_missing_date = 0
     dropped_old_date = 0
     dropped_no_title_url = 0
+    dropped_topic_mismatch = 0
 
     next_id = start_id
     for entry in entries:
@@ -503,7 +541,7 @@ def _normalize_rss_entries(
                     "raw_date_fields": raw_date_fields,
                     "kept": False,
                     "drop_reason": drop_reason,
-                    "ingestion_mode": "rss",
+                    "ingestion_mode": ingestion_mode,
                     "feed_url": feed_url,
                     "requested_domain": domain,
                 }
@@ -525,7 +563,7 @@ def _normalize_rss_entries(
                     "raw_date_fields": raw_date_fields,
                     "kept": False,
                     "drop_reason": drop_reason,
-                    "ingestion_mode": "rss",
+                    "ingestion_mode": ingestion_mode,
                     "feed_url": feed_url,
                     "requested_domain": domain,
                 }
@@ -548,7 +586,29 @@ def _normalize_rss_entries(
                     "raw_date_fields": raw_date_fields,
                     "kept": False,
                     "drop_reason": drop_reason,
-                    "ingestion_mode": "rss",
+                    "ingestion_mode": ingestion_mode,
+                    "feed_url": feed_url,
+                    "requested_domain": domain,
+                }
+            )
+            next_id += 1
+            continue
+
+        if has_topic and not _topic_matches(keywords, title, summary):
+            dropped_topic_mismatch += 1
+            drop_reason = "topic_mismatch"
+            audit.append(
+                {
+                    "id": str(next_id),
+                    "title": title,
+                    "url": url,
+                    "url_domain": _extract_domain(url),
+                    "published_at": published_at_str,
+                    "published_at_source": published_source,
+                    "raw_date_fields": raw_date_fields,
+                    "kept": False,
+                    "drop_reason": drop_reason,
+                    "ingestion_mode": ingestion_mode,
                     "feed_url": feed_url,
                     "requested_domain": domain,
                 }
@@ -567,7 +627,7 @@ def _normalize_rss_entries(
                 "raw_date_fields": raw_date_fields,
                 "kept": True,
                 "drop_reason": "",
-                "ingestion_mode": "rss",
+                "ingestion_mode": ingestion_mode,
                 "feed_url": feed_url,
                 "requested_domain": domain,
             }
@@ -587,7 +647,7 @@ def _normalize_rss_entries(
         next_id += 1
 
     stats = {
-        "ingestion_mode": "rss",
+        "ingestion_mode": ingestion_mode,
         "requested_domain": domain,
         "feed_url": feed_url,
         "entries_count": len(entries),
@@ -596,278 +656,25 @@ def _normalize_rss_entries(
         "dropped_no_title_url": dropped_no_title_url,
         "dropped_missing_date": dropped_missing_date,
         "dropped_old_date": dropped_old_date,
+        "dropped_topic_mismatch": dropped_topic_mismatch,
     }
     return normalized, audit, stats
 
 
-def _http_fetch_text(url: str, timeout: float = 4.0) -> str:
+def _fetch_feed_raw(url: str, timeout: float = 8.0) -> str:
     req = urllib.request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ArticlePipelineBot/1.0",
-            "Accept": "text/html,application/xhtml+xml",
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
         },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        content_type = str(resp.headers.get("Content-Type", "")).lower()
-        if "html" not in content_type and "xml" not in content_type:
-            return ""
         charset = resp.headers.get_content_charset() or "utf-8"
-        body = resp.read(250_000)
+        # Some feeds (e.g. arxiv.org/rss/cs) run several MB; cap generously so we
+        # bound worst-case memory/cache size without truncating real feeds mid-XML.
+        body = resp.read(15_000_000)
         return body.decode(charset, errors="replace")
-
-
-def _find_first_date_in_jsonld(payload: Any) -> Optional[str]:
-    candidate_keys = {"datePublished", "dateCreated", "dateModified", "uploadDate"}
-    if isinstance(payload, dict):
-        for key in candidate_keys:
-            if key in payload:
-                value = payload.get(key)
-                if value is not None and str(value).strip():
-                    return str(value).strip()
-        for value in payload.values():
-            found = _find_first_date_in_jsonld(value)
-            if found:
-                return found
-    elif isinstance(payload, list):
-        for item in payload:
-            found = _find_first_date_in_jsonld(item)
-            if found:
-                return found
-    return None
-
-
-def _extract_date_from_html(html: str) -> tuple[Optional[datetime], str, str]:
-    if not html:
-        return None, "", ""
-
-    meta_patterns = [
-        r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|og:published_time|publish_date|pubdate|date|dc\.date|dc\.date\.issued)["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|og:published_time|publish_date|pubdate|date|dc\.date|dc\.date\.issued)["\']',
-    ]
-    for pattern in meta_patterns:
-        match = re.search(pattern, html, flags=re.IGNORECASE)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        parsed = _parse_datetime(value)
-        if parsed:
-            return parsed.astimezone(timezone.utc), "html.meta", value
-
-    time_match = re.search(r'<time[^>]+datetime=["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
-    if time_match:
-        value = time_match.group(1).strip()
-        parsed = _parse_datetime(value)
-        if parsed:
-            return parsed.astimezone(timezone.utc), "html.time", value
-
-    jsonld_blocks = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    for block in jsonld_blocks:
-        candidate = block.strip()
-        if not candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        date_text = _find_first_date_in_jsonld(payload)
-        if not date_text:
-            continue
-        parsed = _parse_datetime(date_text)
-        if parsed:
-            return parsed.astimezone(timezone.utc), "html.jsonld", date_text
-
-    text_date, matched = _extract_date_from_text(html)
-    if text_date:
-        return text_date.astimezone(timezone.utc), "html.text_scan", matched
-
-    return None, "", ""
-
-
-def _enrich_published_at_from_url(url: str) -> tuple[Optional[datetime], str, str]:
-    if not url:
-        return None, "", ""
-
-    try:
-        html = _http_fetch_text(url)
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-        return None, "", ""
-    except Exception:
-        return None, "", ""
-
-    return _extract_date_from_html(html)
-
-
-def _normalize_tavily_results(
-    raw: Any,
-    include_domains: Optional[List[str]] = None,
-    requested_domain: Optional[str] = None,
-    query: str = "",
-) -> tuple[List[Article], Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
-    if isinstance(raw, list):
-        records = raw
-    elif isinstance(raw, dict):
-        results = raw.get("results")
-        if isinstance(results, list):
-            records = results
-
-    normalized: List[Article] = []
-    max_age_days = get_max_article_age_days()
-    allow_undated = get_allow_undated_articles()
-    now = datetime.now(timezone.utc)
-    cutoff = now.timestamp() - (max_age_days * 24 * 60 * 60)
-    dropped_no_title_url = 0
-    dropped_missing_date = 0
-    dropped_old_date = 0
-    url_enrichment_attempted = 0
-    url_enrichment_success = 0
-    requested_domains = sorted({(d or "").strip().lower() for d in (include_domains or []) if (d or "").strip()})
-    returned_domain_counts: Dict[str, int] = {}
-    kept_outside_requested_domains = 0
-    url_audit: List[Dict[str, Any]] = []
-    url_date_cache: Dict[str, tuple[Optional[datetime], str, str]] = {}
-    for i, item in enumerate(records, start=1):
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title", "")).strip()
-        url = str(item.get("url", "")).strip()
-        content = str(item.get("content", "")).strip()
-        source = str(item.get("source", "")).strip()
-        url_domain = _extract_domain(url)
-        published_at, published_source, raw_date_fields = _extract_published_at(item)
-        if not published_at and url:
-            if url not in url_date_cache:
-                url_enrichment_attempted += 1
-                url_date_cache[url] = _enrich_published_at_from_url(url)
-            enriched_at, enriched_source, enriched_raw = url_date_cache[url]
-            if enriched_at:
-                published_at = enriched_at
-                published_source = f"url_enrichment.{enriched_source}" if enriched_source else "url_enrichment"
-                raw_date_fields["url_enrichment.matched_value"] = enriched_raw[:120]
-                url_enrichment_success += 1
-        drop_reason = ""
-        if not title and not url:
-            dropped_no_title_url += 1
-            drop_reason = "missing_title_and_url"
-            url_audit.append(
-                {
-                    "id": str(i),
-                    "title": title,
-                    "url": url,
-                    "published_at": published_at.isoformat() if published_at else "",
-                    "url_domain": url_domain,
-                    "published_at_source": published_source,
-                    "raw_date_fields": raw_date_fields,
-                    "kept": False,
-                    "drop_reason": drop_reason,
-                    "ingestion_mode": "tavily",
-                    "requested_domain": requested_domain or "",
-                    "query": query,
-                }
-            )
-            continue
-        if not published_at and not allow_undated:
-            dropped_missing_date += 1
-            drop_reason = "missing_publish_date"
-            url_audit.append(
-                {
-                    "id": str(i),
-                    "title": title,
-                    "url": url,
-                    "published_at": "",
-                    "url_domain": url_domain,
-                    "published_at_source": published_source,
-                    "raw_date_fields": raw_date_fields,
-                    "kept": False,
-                    "drop_reason": drop_reason,
-                    "ingestion_mode": "tavily",
-                    "requested_domain": requested_domain or "",
-                    "query": query,
-                }
-            )
-            continue
-        published_at_str = published_at.isoformat() if published_at else ""
-        if published_at and published_at.timestamp() < cutoff:
-            dropped_old_date += 1
-            drop_reason = "older_than_max_age"
-            url_audit.append(
-                {
-                    "id": str(i),
-                    "title": title,
-                    "url": url,
-                    "published_at": published_at_str,
-                    "url_domain": url_domain,
-                    "published_at_source": published_source,
-                    "raw_date_fields": raw_date_fields,
-                    "kept": False,
-                    "drop_reason": drop_reason,
-                    "ingestion_mode": "tavily",
-                    "requested_domain": requested_domain or "",
-                    "query": query,
-                }
-            )
-            continue
-        url_audit.append(
-            {
-                "id": str(i),
-                "title": title,
-                "url": url,
-                "published_at": published_at_str,
-                "url_domain": url_domain,
-                "published_at_source": published_source,
-                "raw_date_fields": raw_date_fields,
-                "kept": True,
-                "drop_reason": "",
-                "ingestion_mode": "tavily",
-                "requested_domain": requested_domain or "",
-                "query": query,
-            }
-        )
-        if url_domain:
-            returned_domain_counts[url_domain] = returned_domain_counts.get(url_domain, 0) + 1
-            if requested_domains and url_domain not in requested_domains:
-                kept_outside_requested_domains += 1
-        normalized.append(
-            {
-                "id": str(i),
-                "title": title or "Untitled",
-                "url": url,
-                "source": source or "unknown",
-                "published_at": published_at_str,
-                "summary": content,
-                "relevance_score": 0.0,
-            }
-        )
-    debug = {
-        "records_count": len(records),
-        "kept_count": len(normalized),
-        "dropped_no_title_url": dropped_no_title_url,
-        "dropped_missing_date": dropped_missing_date,
-        "dropped_old_date": dropped_old_date,
-        "url_enrichment_attempted": url_enrichment_attempted,
-        "url_enrichment_success": url_enrichment_success,
-        "requested_include_domains": requested_domains,
-        "requested_domain": requested_domain or "",
-        "query": query,
-        "returned_domains_top": sorted(
-            [{"domain": k, "count": v} for k, v in returned_domain_counts.items()],
-            key=lambda x: x["count"],
-            reverse=True,
-        )[:25],
-        "kept_outside_requested_domains": kept_outside_requested_domains,
-        "max_article_age_days": max_age_days,
-        "allow_undated_articles": allow_undated,
-        "generated_at_utc": now.isoformat(),
-        "cutoff_utc": datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat(),
-        "sample_urls": [a.get("url", "") for a in normalized[:3]],
-        "url_audit": url_audit,
-    }
-    return normalized, debug
 
 
 def scout_node(state: AgentState) -> AgentState:
@@ -879,21 +686,27 @@ def scout_node(state: AgentState) -> AgentState:
     include_domains = [d for d in include_domains if d]
 
     max_age_days = get_max_article_age_days()
-    base_query = f"{topic} from the last {max_age_days} days"
+    base_query = topic
 
     rss_domains: List[Dict[str, str]] = []
-    tavily_domains: List[str] = []
+    google_news_domains: List[Dict[str, str]] = []
     unknown_domains: List[str] = []
 
     domain_targets = include_domains or sorted(DOMAIN_INGESTION_MAP.keys())
     for domain in domain_targets:
         route = _resolve_domain_route(domain)
-        mode = route.get("mode", "tavily")
+        mode = route.get("mode", "google_news")
         endpoint = route.get("endpoint", "")
         if mode == "rss" and endpoint:
-            rss_domains.append({"domain": domain, "feed_url": endpoint})
-        elif mode == "tavily":
-            tavily_domains.append(domain)
+            rss_domains.append({"domain": domain, "feed_url": endpoint, "mode": "rss"})
+        elif mode in {"google_news", "tavily"}:
+            google_news_domains.append(
+                {
+                    "domain": domain,
+                    "feed_url": _build_google_news_rss_url(domain, topic, max_age_days),
+                    "mode": "google_news",
+                }
+            )
         else:
             unknown_domains.append(domain)
 
@@ -903,87 +716,79 @@ def scout_node(state: AgentState) -> AgentState:
     errors: List[Dict[str, str]] = []
     next_id = 1
 
-    tavily_available = bool(os.getenv("TAVILY_API_KEY", "").strip())
     tid = state.get("thread_id", "")
-    total_sources = len(rss_domains) + (len(tavily_domains) if tavily_available else 0)
+    source_routes = rss_domains + google_news_domains
+    total_sources = len(source_routes)
     if tid:
         progress_tracker.init_scout(tid, total_sources)
     completed = 0
+    _scout_lock = __import__("threading").Lock()
 
     def _report(source_label: str) -> None:
         nonlocal completed
-        completed += 1
-        pct = int((completed / total_sources) * 80) if total_sources else 80
+        with _scout_lock:
+            completed += 1
+            pct = int((completed / total_sources) * 80) if total_sources else 80
         if tid:
             progress_tracker.advance_scout(tid, source_label, pct, f"Scouting {source_label}... ({completed}/{total_sources})")
 
-    for route in rss_domains:
+    def _fetch_source(route: Dict[str, str]) -> tuple[List[Article], List[Dict[str, Any]], Dict[str, Any], List[Dict[str, str]], int]:
         domain = route["domain"]
         feed_url = route["feed_url"]
+        mode = route.get("mode", "rss")
         _report(domain)
         try:
-            parsed_feed = feedparser.parse(feed_url)
+            cached = feed_cache.get(feed_url)
+            if cached:
+                parsed_feed = feedparser.parse(cached)
+            else:
+                raw_feed_text = _fetch_feed_raw(feed_url)
+                parsed_feed = feedparser.parse(raw_feed_text)
+                if not getattr(parsed_feed, "bozo", False):
+                    try:
+                        feed_cache.set(feed_url, raw_feed_text)
+                    except Exception:
+                        pass
             if getattr(parsed_feed, "bozo", False):
-                errors.append(
-                    {
-                        "ingestion_mode": "rss",
-                        "domain": domain,
-                        "endpoint": feed_url,
-                        "error": str(getattr(parsed_feed, "bozo_exception", "failed to parse feed")),
-                    }
-                )
-                continue
-            articles, audit, stats = _normalize_rss_entries(domain, feed_url, parsed_feed, start_id=next_id)
-            all_articles.extend(articles)
-            all_audit.extend(audit)
-            per_source_stats.append(stats)
-            next_id += len(audit)
-        except Exception as exc:
-            errors.append(
-                {
-                    "ingestion_mode": "rss",
+                return [], [], {}, [{
+                    "ingestion_mode": mode,
                     "domain": domain,
                     "endpoint": feed_url,
-                    "error": str(exc),
-                }
+                    "error": str(getattr(parsed_feed, "bozo_exception", "failed to parse feed")),
+                }], 0
+            articles, audit, stats = _normalize_rss_entries(
+                domain,
+                feed_url,
+                parsed_feed,
+                start_id=0,
+                topic=topic,
+                ingestion_mode=mode,
             )
-
-    if tavily_domains and not tavily_available:
-        errors.append(
-            {
-                "ingestion_mode": "tavily",
-                "domain": "*",
-                "endpoint": "",
-                "error": "Missing TAVILY_API_KEY; skipped Tavily-routed domains",
-            }
-        )
-
-    if tavily_domains and tavily_available:
-        search, search_impl = _build_tavily_search_tool(max_results=8)
-        for domain in tavily_domains:
-            _report(domain)
-            domain_query = f"site:{domain} {base_query}"
-            try:
-                raw_results = _invoke_tavily_search(search, domain_query, include_domains=[domain])
-                domain_articles, domain_debug = _normalize_tavily_results(
-                    raw_results,
-                    include_domains=[domain],
-                    requested_domain=domain,
-                    query=domain_query,
+            if tid:
+                progress_tracker.record_source_result(
+                    tid, domain, len(articles), stats.get("entries_count", 0), mode,
+                    drops={k: stats.get(k, 0) for k in ["dropped_no_title_url", "dropped_missing_date", "dropped_old_date", "dropped_topic_mismatch"]},
                 )
-                domain_debug["tavily_impl"] = search_impl
-                all_articles.extend(domain_articles)
-                all_audit.extend(domain_debug.get("url_audit", []))
-                per_source_stats.append(domain_debug)
-            except Exception as exc:
-                errors.append(
-                    {
-                        "ingestion_mode": "tavily",
-                        "domain": domain,
-                        "endpoint": "",
-                        "error": str(exc),
-                    }
-                )
+            return articles, audit, stats, [], len(audit)
+        except Exception as exc:
+            return [], [], {}, [{
+                "ingestion_mode": mode,
+                "domain": domain,
+                "endpoint": feed_url,
+                "error": str(exc),
+            }], 0
+
+    max_workers = min(int(os.getenv("SCOUT_MAX_WORKERS", "6")), total_sources) if total_sources else 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_source, route): route for route in source_routes}
+        for future in as_completed(futures):
+            articles, audit, stats, errs, audit_count = future.result()
+            all_articles.extend(articles)
+            all_audit.extend(audit)
+            if stats:
+                per_source_stats.append(stats)
+            errors.extend(errs)
+            next_id += audit_count
 
     deduped_articles: List[Article] = []
     seen_urls: set[str] = set()
@@ -1015,14 +820,16 @@ def scout_node(state: AgentState) -> AgentState:
         "effective_domain_mode": "domain_routing_map",
         "routing": {
             "rss_domains": rss_domains,
-            "tavily_domains": tavily_domains,
+            "google_news_domains": google_news_domains,
+            "tavily_domains": [],
             "unknown_domains": unknown_domains,
             "fallback_domains": fallback_domains,
         },
         "stats": {
             "requested_domain_count": len(domain_targets),
             "rss_domain_count": len(rss_domains),
-            "tavily_domain_count": len(tavily_domains),
+            "google_news_domain_count": len(google_news_domains),
+            "tavily_domain_count": 0,
             "unknown_domain_count": len(unknown_domains),
             "records_count": len(all_audit),
             "kept_count": len(deduped_articles),
@@ -1069,6 +876,9 @@ def analyst_node(state: AgentState) -> AgentState:
     analyst_model = state.get("analyst_model")
     analyst_llm = _get_chat_model(provider, role="analyst", model_override=analyst_model)
 
+    topic = state.get("topic", "")
+    max_article_age_days = get_max_article_age_days()
+
     article_lines = []
     for item in prepared_articles:
         article_lines.append(
@@ -1085,12 +895,31 @@ def analyst_node(state: AgentState) -> AgentState:
 
     prompt = "\n\n".join(
         [
-            "You are a research analyst for a technical founder with a CTO + PhD profile.",
-            "Prioritize relevance to these themes: Model Context Protocol (MCP), agentic workflows, and SaaS business impact.",
-            "Only choose articles that are clearly recent (published in the last 14 days).",
-            "Select up to the top 20 items. Prefer practical, strategic, and high-signal content over hype.",
-            f"Input set has been truncated to the {len(prepared_articles)} most recent items for prompt size safety.",
-            "Return only valid structured output.",
+            f"You are a research analyst curating articles for a technical founder (CTO + PhD). Topic: {topic}.",
+            f"Only include articles published in the last {max_article_age_days} days. Return at most 20 picks.",
+            "Only return articles with relevance_score >= 5.0. If none qualify, return an empty picks list.",
+            "",
+            "Score each article 0-10 on these axes, then compute relevance_score as the weighted average:",
+            "  Contrarian/Insight Value (0.30): challenges assumptions, reveals non-obvious truths",
+            "  Technical Depth (0.25): actionable implementation details, not market commentary",
+            "  Debate Potential (0.20): would generate meaningful discussion among technical peers",
+            "  Timeliness (0.15): still relevant in 3-5 days, not breaking news that fades fast",
+            "  Source Credibility (0.10): known for technical rigor (engineering/research blogs > aggregators)",
+            "",
+            "AUTO-REJECT (score 0-2): press releases, funding announcements, generic trend pieces, clickbait, tutorials without insight, paywalled/thin summaries (<150 chars).",
+            "STRONGLY PREFER (score 7-10): contrarian angles, tradeoff analysis, benchmarks/specific data, opinionated stances, articles that explain 'why this matters'.",
+            "",
+            "Example of a high-scoring article:",
+            '  Title: "Why Agentic Workflows Break in Production"',
+            "  Summary: A survey of 200 production agent deployments reveals 5 common failure modes including state corruption and unbounded retry loops. The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%.",
+            "  Scores: contrarian_value=9, technical_depth=8, debate_potential=9, timeliness=8, source_credibility=7, relevance_score=8.3",
+            "",
+            "Example of a low-scoring article:",
+            '  Title: "Acme Corp Launches AI-Powered Dashboard"',
+            "  Summary: Acme Corp announced a new AI-powered analytics dashboard for enterprise customers. The CEO said it will transform how businesses leverage data.",
+            "  Scores: contrarian_value=1, technical_depth=1, debate_potential=1, timeliness=3, source_credibility=2, relevance_score=1.4",
+            "",
+            f"Input: {len(prepared_articles)} articles. Return only valid structured output.",
             "Articles:",
             "\n\n".join(article_lines),
         ]
@@ -1177,6 +1006,26 @@ def approval_node(state: AgentState) -> AgentState:
     }
 
 
+def _verify_factuality(draft: str, article: Article, llm: Any) -> str:
+    if not draft or not article:
+        return ""
+    summary = (article.get("summary", "") or "")[:AUTHOR_SUMMARY_MAX_CHARS]
+    if not summary.strip():
+        return ""
+    prompt = f"""You are a fact-checker. Compare the LinkedIn draft below against the source article summary. List any factual claims in the draft that are NOT supported by the source summary. If all claims are supported, say "All claims verified." Be concise.
+
+Source summary:
+{summary}
+
+Draft:
+{draft}"""
+    try:
+        response = llm.invoke(prompt)
+        return str(response.content).strip()
+    except Exception:
+        return ""
+
+
 def author_node(state: AgentState) -> AgentState:
     tid = state.get("thread_id", "")
     if tid:
@@ -1203,37 +1052,122 @@ def author_node(state: AgentState) -> AgentState:
     writer_llm = _get_chat_model(provider, role="writer", model_override=writer_model)
     feedback = state.get("human_feedback")
 
-    prompt = "\n".join(
-        [
-            "Write a high-quality LinkedIn post for a CTO/PhD audience.",
-            "Tone: authoritative, concise, practical, and intellectually honest.",
-            "Structure:",
-            "1) strong hook,",
-            "2) why this matters now,",
-            "3) 3 tactical insights,",
-            "4) closing question for engagement.",
-            "Keep it under 220 words. No emojis. No hashtags spam (max 3 relevant hashtags).",
-            "",
-            f"Article title: {article.get('title', '')}",
-            f"Article url: {article.get('url', '')}",
-            f"Article published_at: {article.get('published_at', '')}",
-            f"Article summary: {(article.get('summary', '') or '')[:AUTHOR_SUMMARY_MAX_CHARS]}",
-            f"Analyst relevance score: {article.get('relevance_score', 0.0)}",
-            f"Human feedback: {feedback or 'None'}",
-        ]
+    prompt = f"""Write a LinkedIn post about the article below. You are a senior CTO and Ph.D. — a builder who has spent years in the trenches of distributed systems, agentic AI, and production infrastructure.
+
+VOICE:
+- Authoritative, blunt, intellectually honest. No corporate jargon (leverage, synergy, transformative, game-changer, paradigm shift).
+- Dry, cynical humor rooted in technical frustration — understatements, not jokes. "This is a fantastic way to spend a weekend debugging race conditions."
+- Skeptical optimism: acknowledge the innovation, then immediately surface the hidden cost or operational bottleneck.
+- Short, punchy sentences. Start in the middle of the argument — no filler intros like "I'm excited" or "In today's AI landscape."
+- If the article claims something is "easy" or "seamless," mock that claim with a dry observation about the inevitable edge cases.
+
+STRUCTURE:
+1. Hook — A contrarian statement, blunt observation, or hard-learned lesson. Never a greeting or preamble.
+2. Tension — Why this matters for builders, not spectators. The hidden difficulty or unspoken implication.
+3. 3 Tactical Insights — Bullet points. What this means for implementation, architecture, or engineering strategy.
+4. Closing — A provocative, opinionated question that invites debate from technical peers.
+
+CONSTRAINTS:
+- Under 220 words. No emojis. Max 3 hashtags. No em dashes.
+
+EXAMPLE OUTPUT:
+The promise of agentic workflows is that they'll automate complex reasoning chains. The reality is that most production deployments are one state corruption bug away from a 3 AM incident.
+
+What the paper actually found: 200 production agent deployments, 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents. This isn't a maturity problem. It's an architecture problem.
+
+What this means if you're building:
+• Checkpoint-and-replay isn't optional — it's table stakes. If your agent can't resume from a known good state after a tool call fails, you're shipping a time bomb.
+• Tool call budgets matter more than model quality. A 3-tool-call limit with good error handling beats unlimited calls with a better model.
+• Observability for agents is fundamentally different from observability for services. You need to trace the reasoning graph, not just the request graph.
+
+The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%. The catch? It adds 15-20% latency per tool call. Worth it for anything customer-facing. Probably overkill for internal dashboards.
+
+Are we over-indexing on model benchmarks and under-investing in the operational primitives that actually keep agents running in production?
+
+Article title: {article.get('title', '')}
+Article url: {article.get('url', '')}
+Article published_at: {article.get('published_at', '')}
+Article summary: {(article.get('summary', '') or '')[:AUTHOR_SUMMARY_MAX_CHARS]}
+Analyst relevance score: {article.get('relevance_score', 0.0)}
+Human feedback: {feedback or 'None'}"""
+
+    if tid:
+        progress_tracker.clear_stream(tid)
+        progress_tracker.set_phase(tid, "author", 95, "Generating LinkedIn draft...")
+
+    full_draft = ""
+    try:
+        for chunk in writer_llm.stream(prompt):
+            token = str(getattr(chunk, "content", "") or "")
+            if token:
+                full_draft += token
+                if tid:
+                    progress_tracker.append_stream_token(tid, token)
+    except Exception:
+        full_draft = str(writer_llm.invoke(prompt).content)
+
+    if tid:
+        progress_tracker.mark_stream_done(tid)
+        progress_tracker.set_phase(tid, "author", 100, "Draft generated")
+
+    factuality_notes = (
+        _verify_factuality(full_draft, article, writer_llm)
+        if get_factuality_check_enabled()
+        else ""
     )
 
-    response = writer_llm.invoke(prompt)
-    if tid:
-        progress_tracker.set_phase(tid, "author", 100, "Draft generated")
     return {
-        "final_draft": str(response.content),
+        "final_draft": full_draft,
         "workflow_status": "awaiting_draft_approval",
+        "scout_debug": {**(state.get("scout_debug") or {}), "factuality_notes": factuality_notes},
     }
 
 
-def edit_approval_node(state: AgentState) -> AgentState:
+def _apply_draft_review_action(
+    state: AgentState,
+    action: str,
+    edited_draft: Optional[str] = None,
+) -> AgentState:
     tid = state.get("thread_id", "")
+    final_draft = state.get("final_draft")
+    result: Dict[str, Any] = {}
+
+    if action not in DRAFT_REVIEW_ACTIONS:
+        raise ValueError(
+            f"Unsupported draft review action '{action}'. "
+            f"Expected one of: {', '.join(sorted(DRAFT_REVIEW_ACTIONS))}."
+        )
+
+    if action == "done":
+        result["workflow_status"] = "done"
+    elif action == "pick_another":
+        result["final_draft"] = None
+        result["selected_article_id"] = None
+        result["workflow_status"] = "awaiting_approval"
+    elif action == "edit":
+        if not edited_draft:
+            raise ValueError("edited_draft is required when action is 'edit'.")
+        result["final_draft"] = edited_draft
+        result["workflow_status"] = "awaiting_draft_approval"
+    elif action == "publish":
+        now = datetime.now(timezone.utc)
+        existing_drafts = state.get("published_drafts", []) or []
+        result["final_draft"] = None
+        result["selected_article_id"] = None
+        result["workflow_status"] = "published"
+        result["published_drafts"] = existing_drafts + [
+            {
+                "published_at": now.isoformat(),
+                "draft": final_draft or "",
+                "article_id": str(state.get("selected_article_id", "")),
+            }
+        ]
+        if tid:
+            progress_tracker.set_phase(tid, "edit_approval", 100, "Draft published")
+    return result
+
+
+def edit_approval_node(state: AgentState) -> AgentState:
     final_draft = state.get("final_draft")
     published_drafts = state.get("published_drafts", [])
     last_published = published_drafts[-1] if published_drafts else None
@@ -1254,39 +1188,16 @@ def edit_approval_node(state: AgentState) -> AgentState:
     edited_draft: Optional[str] = None
 
     if isinstance(resume_data, dict):
-        action = str(resume_data.get("action", "publish")).strip().lower()
+        if "action" not in resume_data:
+            raise ValueError("Draft review resume payload must include action.")
+        action = str(resume_data.get("action", "")).strip().lower()
         edited_draft = resume_data.get("edited_draft")
         if edited_draft is not None:
             edited_draft = str(edited_draft).strip()
     elif resume_data is not None:
         action = str(resume_data).strip().lower()
 
-    result: Dict[str, Any] = {}
-    if action == "done":
-        result["workflow_status"] = "done"
-    elif action == "pick_another":
-        result["final_draft"] = None
-        result["selected_article_id"] = None
-        result["workflow_status"] = "awaiting_approval"
-    elif action == "edit" and edited_draft:
-        result["final_draft"] = edited_draft
-        result["workflow_status"] = "awaiting_draft_approval"
-    else:
-        now = datetime.now(timezone.utc)
-        existing_drafts = state.get("published_drafts", []) or []
-        result["final_draft"] = None
-        result["selected_article_id"] = None
-        result["workflow_status"] = "published"
-        result["published_drafts"] = existing_drafts + [
-            {
-                "published_at": now.isoformat(),
-                "draft": final_draft or "",
-                "article_id": str(state.get("selected_article_id", "")),
-            }
-        ]
-        if tid:
-            progress_tracker.set_phase(tid, "edit_approval", 100, "Draft published")
-    return result
+    return _apply_draft_review_action(state, action, edited_draft)
 
 
 def _route_after_author(state: AgentState) -> str:
@@ -1334,6 +1245,12 @@ def build_graph():
         {"approval": "approval", "edit_approval": "edit_approval", "end": END},
     )
 
-    checkpointer = MemorySaver()
+    db_path = os.getenv("CHECKPOINT_DB_PATH", os.path.join(os.path.dirname(__file__), "checkpoints.db"))
+    # Connect directly rather than via SqliteSaver.from_conn_string()'s contextmanager:
+    # that generator's underlying connection gets closed by garbage collection as soon
+    # as build_graph() returns (nothing keeps the generator itself alive), which closed
+    # the database before the first invoke() ever ran.
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
     app = workflow.compile(checkpointer=checkpointer)
     return app

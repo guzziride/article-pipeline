@@ -14,7 +14,9 @@ RSS_MAX_ITEMS_PER_FEED_FALLBACK = 25
 SCOUT_MAX_TOTAL_ARTICLES_KEY = "SCOUT_MAX_TOTAL_ARTICLES"
 SCOUT_MAX_TOTAL_ARTICLES_FALLBACK = 80
 OLLAMA_MODEL_OPTIONS_KEY = "OLLAMA_MODEL_OPTIONS"
-OLLAMA_MODEL_OPTIONS_FALLBACK = "gemini-3-flash-preview:cloud,gemma4:31b-cloud,llama3.1,llama3.2"
+OLLAMA_MODEL_OPTIONS_FALLBACK = "deepseek-v4-flash:cloud,gemma4:31b-cloud,llama3.1,llama3.2"
+ENABLE_FACTUALITY_CHECK_KEY = "ENABLE_FACTUALITY_CHECK"
+ENABLE_FACTUALITY_CHECK_FALLBACK = True
 
 
 def get_default_topic() -> str:
@@ -64,6 +66,12 @@ def get_ollama_model_options() -> list[str]:
     load_dotenv(override=True)
     raw = os.getenv(OLLAMA_MODEL_OPTIONS_KEY, OLLAMA_MODEL_OPTIONS_FALLBACK)
     return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def get_factuality_check_enabled() -> bool:
+    load_dotenv(override=True)
+    raw = (os.getenv(ENABLE_FACTUALITY_CHECK_KEY, str(ENABLE_FACTUALITY_CHECK_FALLBACK)) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 DEFAULT_TOPIC = get_default_topic()

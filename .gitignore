@@ -7,5 +7,17 @@ __pycache__/
 drafts.db
 drafts.db-shm
 drafts.db-wal
+cache.db
+cache.db-shm
+cache.db-wal
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+scheduled_runs.db
+scheduled_runs.db-shm
+scheduled_runs.db-wal
+domains.db
+domains.db-shm
+domains.db-wal
 article Working Space.txt
 static/favicon.ico

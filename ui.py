@@ -1,17 +1,22 @@
 import os
+import asyncio
+import json as _json
 from datetime import datetime, timezone
 from html import escape
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 import progress as progress_tracker
 import draft_store
+import domain_store
+import scheduled_store
+import scheduler
 from graph import _get_chat_model, build_graph
 from settings import get_default_topic, get_ollama_model_options
 
@@ -22,6 +27,11 @@ web_app = FastAPI(title="Article Pipeline UI")
 web_app.mount("/static", StaticFiles(directory="static"), name="static")
 graph_app = build_graph()
 RUN_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
+
+# Must comfortably exceed LLM_REQUEST_TIMEOUT (and its retries) or the SSE stream
+# will report {"done": true} while the author/factuality calls are still running.
+SSE_POLL_INTERVAL_SECONDS = 0.15
+SSE_STREAM_TIMEOUT_SECONDS = int(os.getenv("SSE_STREAM_TIMEOUT_SECONDS", "240"))
 
 
 class StartRequest(BaseModel):
@@ -44,11 +54,22 @@ class ResumeRequest(BaseModel):
     edited_draft: Optional[str] = Field(default=None)
 
 
+class RefineRequest(BaseModel):
+    thread_id: str = Field(...)
+    instruction: str = Field(...)
+    current_draft: str = Field(...)
+
+
 class ProviderHealthRequest(BaseModel):
     analyst_provider: str = Field(...)
     writer_provider: str = Field(...)
     analyst_model: Optional[str] = Field(default=None)
     writer_model: Optional[str] = Field(default=None)
+
+
+class DomainsRequest(BaseModel):
+    domains: List[str] = Field(default_factory=list)
+    disabled: List[str] = Field(default_factory=list)
 
 
 def _config(thread_id: str) -> Dict[str, Any]:
@@ -145,19 +166,23 @@ def index() -> str:
       --line: #d7dee8;
     }
     * { box-sizing: border-box; }
+    html { max-width: 100%; overflow-x: hidden; }
     body {
       margin: 0;
       font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
       color: var(--ink);
       background: radial-gradient(circle at top right, #d8ecf8 0%, var(--bg) 45%);
+      max-width: 100%;
+      overflow-x: hidden;
     }
     .wrap {
-      max-width: 1080px;
+      width: min(1080px, 100%);
       margin: 24px auto;
       padding: 0 16px;
       display: grid;
       grid-template-columns: 1fr;
       gap: 16px;
+      min-width: 0;
     }
     .card {
       background: var(--panel);
@@ -165,13 +190,14 @@ def index() -> str:
       border-radius: 14px;
       padding: 16px;
       box-shadow: 0 8px 24px rgba(19, 33, 68, 0.06);
+      min-width: 0;
     }
     h1 { margin: 0 0 10px; font-size: 24px; }
     h2 { margin: 0 0 10px; font-size: 18px; }
     p, label { color: var(--muted); }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
       gap: 10px;
     }
     input, select, textarea, button {
@@ -206,7 +232,7 @@ def index() -> str:
     }
     .progress-row {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));
       gap: 8px;
     }
     .step {
@@ -229,7 +255,9 @@ def index() -> str:
       color: #166534;
       background: #ecfdf5;
     }
-    .row { display: flex; gap: 10px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .row > * { flex: 1 1 180px; min-width: 0; }
+    a { overflow-wrap: anywhere; word-break: break-word; }
     .pill {
       display: inline-block;
       padding: 6px 10px;
@@ -244,6 +272,22 @@ def index() -> str:
       border-radius: 10px;
       padding: 10px;
       margin-bottom: 10px;
+      min-width: 0;
+      cursor: pointer;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .candidate:hover { border-color: var(--accent); }
+    .candidate.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(14, 116, 144, 0.25);
+      background: #f0f9ff;
+    }
+    .candidate-radio {
+      width: 18px;
+      height: 18px;
+      margin-right: 8px;
+      accent-color: var(--accent);
+      flex-shrink: 0;
     }
     .raw-item {
       border: 1px solid var(--line);
@@ -251,6 +295,7 @@ def index() -> str:
       padding: 10px;
       margin-bottom: 10px;
       background: #f8fafc;
+      min-width: 0;
     }
     pre {
       white-space: pre-wrap;
@@ -259,6 +304,7 @@ def index() -> str:
       padding: 12px;
       border-radius: 10px;
       overflow: auto;
+      max-width: 100%;
     }
     .muted { color: var(--muted); font-size: 14px; }
     .history-item {
@@ -267,6 +313,7 @@ def index() -> str:
       padding: 10px;
       margin-bottom: 10px;
       background: #fbfdff;
+      min-width: 0;
     }
     .history-meta {
       font-family: "IBM Plex Mono", "Consolas", monospace;
@@ -280,10 +327,11 @@ def index() -> str:
       padding: 10px;
       margin-bottom: 10px;
       background: #fff7ed;
+      min-width: 0;
     }
     .domain-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
       gap: 8px;
       margin-top: 8px;
     }
@@ -306,7 +354,9 @@ def index() -> str:
     .domain-item code {
       font-family: "IBM Plex Mono", "Consolas", monospace;
       font-size: 13px;
+      overflow-wrap: anywhere;
     }
+    #source-breakdown > div { flex-wrap: wrap; gap: 8px; }
     .progress-bar-wrap {
       height: 8px;
       background: #e2e8f0;
@@ -368,9 +418,9 @@ __OLLAMA_OPTIONS__
         <option value="o1-mini">
       </datalist>
       <datalist id="gemini-models">
+        <option value="gemini-2.5-flash">
+        <option value="gemini-2.5-pro">
         <option value="gemini-2.0-flash">
-        <option value="gemini-1.5-pro">
-        <option value="gemini-1.5-flash">
       </datalist>
       <datalist id="groq-models">
         <option value="llama-3.1-8b-instant">
@@ -416,7 +466,13 @@ __OLLAMA_OPTIONS__
     </section>
 
     <section class="card">
-      <h2>2) Curated Candidates (Approval Step)</h2>
+      <h2>2) Articles Retrieved by Source</h2>
+      <p class="muted">Per-source breakdown of articles kept after scouting.</p>
+      <div id="source-breakdown" class="muted">No source data yet.</div>
+    </section>
+
+    <section class="card">
+      <h2>3) Curated Candidates (Approval Step)</h2>
       <div id="candidates" class="muted">No candidates yet.</div>
       <div class="grid" style="margin-top:10px;">
         <div><label>Selected Article ID</label><input id="selected-id" /></div>
@@ -427,19 +483,29 @@ __OLLAMA_OPTIONS__
         <textarea id="human-feedback" placeholder="Example: emphasize implications for SaaS pricing and GTM"></textarea>
       </div>
       <div class="row" style="margin-top:10px;">
-        <button id="resume-btn">Approve + Resume</button>
+        <button id="resume-btn">Approve + Generate Draft</button>
       </div>
     </section>
 
     <section class="card">
       <details>
-        <summary style="cursor:pointer; font-weight:bold; font-size:18px;"><h2 style="display:inline; margin:0;">2b) Raw Articles (All Scout Results)</h2></summary>
+        <summary style="cursor:pointer; font-weight:bold; font-size:18px;"><h2 style="display:inline; margin:0;">3b) Raw Articles (All Scout Results)</h2></summary>
         <div id="raw-articles" class="muted" style="margin-top:10px;">No raw articles yet.</div>
       </details>
     </section>
 
     <section class="card">
-      <h2>3) Draft Review & Publish</h2>
+      <h2>4) Draft Review & Publish</h2>
+      <div style="margin-bottom:10px;">
+        <label>Quick Refine</label>
+        <div class="row" style="gap:6px; flex-wrap:wrap; margin-top:6px;">
+          <button id="refine-hook" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Make Hook Punchier</button>
+          <button id="refine-shorten" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Shorten</button>
+          <button id="refine-technical" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">More Technical</button>
+          <button id="refine-cta" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Stronger CTA</button>
+          <button id="refine-grammar" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Fix Grammar</button>
+        </div>
+      </div>
       <div style="margin-bottom:10px;">
         <label>Edit draft before approving</label>
         <textarea id="draft-editor" style="min-height:220px; font-family: 'IBM Plex Mono', 'Consolas', monospace; font-size:13px; white-space:pre-wrap;">No draft yet.</textarea>
@@ -457,8 +523,15 @@ __OLLAMA_OPTIONS__
         <strong>Pick Another Article</strong> — go back to approval step (articles preserved).<br/>
         <strong>Open LinkedIn Post</strong> — opens LinkedIn composer with draft content.
       </p>
+      <div id="factuality-notes" class="muted" style="margin-top:10px; padding:8px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; display:none;"></div>
       <h3 style="margin-top:14px;">Published Drafts (This Thread)</h3>
       <div id="published-drafts" class="muted">None published yet.</div>
+    </section>
+
+    <section class="card">
+      <h2>Sources Queried</h2>
+      <p class="muted">Each source is logged in real-time as it is queried.</p>
+      <div id="source-log" class="muted">Waiting for scout to start...</div>
     </section>
 
     <section class="card">
@@ -481,6 +554,12 @@ __OLLAMA_OPTIONS__
       <p class="muted">Tracks start/resume/checkpoint snapshots for this thread.</p>
       <div id="history" class="muted">No history yet.</div>
     </section>
+
+    <section class="card">
+      <h2>Scheduled Runs</h2>
+      <p class="muted">Automated scout+analyst runs triggered by the scheduler. Click a run to load its candidates.</p>
+      <div id="scheduled-runs" class="muted">Loading...</div>
+    </section>
   </div>
 
   <script>
@@ -502,6 +581,7 @@ __OLLAMA_OPTIONS__
     const progressSectionEl = document.getElementById("progress-section");
     const progressFillEl = document.getElementById("progress-fill");
     const progressPctEl = document.getElementById("progress-pct");
+    const sourceLogEl = document.getElementById("source-log");
 
     const threadIdEl = document.getElementById("thread-id");
     const topicEl = document.getElementById("topic");
@@ -565,9 +645,36 @@ __OLLAMA_OPTIONS__
       return { domains: merged, disabledSet };
     }
 
-    function saveDomainsState(domains, disabledSet) {
+    function pushDomainsToServer(domains, disabledSet) {
+      fetch("/api/domains", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domains, disabled: [...disabledSet] }),
+      }).catch(() => {});
+    }
+
+    function saveDomainsState(domains, disabledSet, opts) {
       localStorage.setItem(STORAGE_DOMAINS_KEY, JSON.stringify(domains));
       localStorage.setItem(STORAGE_DISABLED_KEY, JSON.stringify([...disabledSet]));
+      if (!opts || !opts.skipServerSync) {
+        pushDomainsToServer(domains, disabledSet);
+      }
+    }
+
+    async function hydrateDomainsFromServer() {
+      try {
+        const res = await fetch("/api/domains");
+        const data = await res.json();
+        const local = loadDomainsState();
+        if (!data.ok || !data.domains || !data.domains.length) {
+          pushDomainsToServer(local.domains, local.disabledSet);
+          return;
+        }
+        const merged = [...new Set([...local.domains, ...data.domains.map(normalizeDomain).filter(Boolean)])];
+        const disabledSet = new Set((data.disabled || []).map(normalizeDomain));
+        saveDomainsState(merged, disabledSet, { skipServerSync: true });
+        renderDomainList();
+      } catch (_) {}
     }
 
     function renderDomainList() {
@@ -639,16 +746,23 @@ __OLLAMA_OPTIONS__
         candidates.innerHTML = "<span class='muted'>No candidates available.</span>";
         return;
       }
+      const currentId = selectedIdEl.value.trim();
       const html = items.map((item) => {
         const safeTitle = (item.title || "Untitled").replace(/</g, "&lt;");
         const safeSummary = (item.summary || "").replace(/</g, "&lt;");
+        const checked = currentId === String(item.id) ? "checked" : "";
+        const selClass = currentId === String(item.id) ? " selected" : "";
         return `
-          <div class="candidate">
-            <div><strong>[${item.id}] ${safeTitle}</strong></div>
-            <div class="muted">Source: ${item.source || "unknown"} | Relevance: ${item.relevance_score ?? 0}</div>
-            <div style="margin:8px 0;"><a href="${item.url}" target="_blank">${item.url}</a></div>
-            <div class="muted">${safeSummary}</div>
-            <div style="margin-top:8px;"><button onclick="pickId('${item.id}')">Use ID ${item.id}</button></div>
+          <div class="candidate${selClass}" data-article-id="${item.id}" onclick="pickId('${item.id}')">
+            <div style="display:flex;align-items:flex-start;">
+              <input type="radio" name="candidate-select" class="candidate-radio" value="${item.id}" ${checked} onclick="event.stopPropagation(); pickId('${item.id}')" />
+              <div style="min-width:0;">
+                <div><strong>[${item.id}] ${safeTitle}</strong></div>
+                <div class="muted">Source: ${item.source || "unknown"} | Relevance: ${item.relevance_score ?? 0}</div>
+                <div style="margin:8px 0;"><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></div>
+                <div class="muted">${safeSummary}</div>
+              </div>
+            </div>
           </div>
         `;
       }).join("");
@@ -711,6 +825,12 @@ __OLLAMA_OPTIONS__
 
     function pickId(id) {
       selectedIdEl.value = id;
+      document.querySelectorAll(".candidate").forEach(el => {
+        el.classList.toggle("selected", el.getAttribute("data-article-id") === String(id));
+      });
+      document.querySelectorAll("input[name='candidate-select']").forEach(r => {
+        r.checked = r.value === String(id);
+      });
     }
     window.pickId = pickId;
 
@@ -764,10 +884,37 @@ __OLLAMA_OPTIONS__
           if (data.message) {
             setActivity(data.message);
           }
+          const log = data.source_log || [];
+          if (log.length) {
+            sourceLogEl.innerHTML = log.map(s => `<span class="pill">${s}</span>`).join(" ");
+          } else if (data.phase === "scout") {
+            sourceLogEl.innerHTML = `<span class="muted">Waiting for first source...</span>`;
+          }
+          const results = data.source_results || [];
+          if (results.length) {
+            renderLiveSourceBreakdown(results);
+          }
           if (pct < 100) return;
           stopStartProgressAnimation();
         })
         .catch(() => {});
+    }
+
+    function renderLiveSourceBreakdown(results) {
+      const html = results.map((s) => {
+        const drops = s.drops || {};
+        const tags = [];
+        if (drops.dropped_topic_mismatch) tags.push(`topic_mismatch: ${drops.dropped_topic_mismatch}`);
+        if (drops.dropped_missing_date) tags.push(`no_date: ${drops.dropped_missing_date}`);
+        if (drops.dropped_old_date) tags.push(`too_old: ${drops.dropped_old_date}`);
+        if (drops.dropped_no_title_url) tags.push(`no_title/url: ${drops.dropped_no_title_url}`);
+        const tagHtml = tags.length ? `<span style="font-size:12px;color:#6b7280;"> (${tags.join(", ")})</span>` : "";
+        return `<div style="padding:6px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;">
+          <span><strong>${s.domain}</strong> <span class="muted">[${s.mode}]</span>${tagHtml}</span>
+          <span><strong>${s.kept}</strong> / ${s.total} articles</span>
+        </div>`;
+      }).join("");
+      document.getElementById("source-breakdown").innerHTML = html;
     }
 
     function startStartProgressAnimation() {
@@ -922,6 +1069,39 @@ __OLLAMA_OPTIONS__
         draftEditorEl.value = "";
       }
       renderPublishedDrafts(state.published_drafts || []);
+      const factualityEl = document.getElementById("factuality-notes");
+      const notes = (state.scout_debug && state.scout_debug.factuality_notes) || "";
+      if (notes && notes !== "All claims verified.") {
+        factualityEl.style.display = "block";
+        factualityEl.innerHTML = "<strong>Factuality Check:</strong> " + notes.replace(/</g, "&lt;");
+      } else {
+        factualityEl.style.display = "none";
+      }
+    }
+
+    function renderSourceBreakdown(scoutDebug) {
+      const sources = (scoutDebug && scoutDebug.sources) || [];
+      if (!sources.length) {
+        document.getElementById("source-breakdown").innerHTML = "<span class='muted'>No source data yet.</span>";
+        return;
+      }
+      const html = sources.map((s) => {
+        const domain = s.requested_domain || s.domain || "unknown";
+        const kept = s.kept_count || 0;
+        const total = s.entries_count || s.records_count || kept;
+        const mode = s.ingestion_mode || "";
+        const tags = [];
+        if (s.dropped_topic_mismatch) tags.push(`topic_mismatch: ${s.dropped_topic_mismatch}`);
+        if (s.dropped_missing_date) tags.push(`no_date: ${s.dropped_missing_date}`);
+        if (s.dropped_old_date) tags.push(`too_old: ${s.dropped_old_date}`);
+        if (s.dropped_no_title_url) tags.push(`no_title/url: ${s.dropped_no_title_url}`);
+        const tagHtml = tags.length ? `<span style="font-size:12px;color:#6b7280;"> (${tags.join(", ")})</span>` : "";
+        return `<div style="padding:6px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;">
+          <span><strong>${domain}</strong> <span class="muted">[${mode}]</span>${tagHtml}</span>
+          <span><strong>${kept}</strong> / ${total} articles</span>
+        </div>`;
+      }).join("");
+      document.getElementById("source-breakdown").innerHTML = html;
     }
 
     function renderPublishedDrafts(drafts) {
@@ -1126,36 +1306,43 @@ __OLLAMA_OPTIONS__
       progressSectionEl.style.display = "block";
       progressFillEl.style.width = "95%";
       progressPctEl.textContent = "95%";
-      const progInterval = setInterval(() => {
-        const tid = threadIdEl.value.trim();
-        if (!tid) return;
-        fetch(`/api/progress/${encodeURIComponent(tid)}`)
-          .then(r => r.json())
-          .then(d => {
-            if (d.ok && d.pct) {
-              progressFillEl.style.width = d.pct + "%";
-              progressPctEl.textContent = d.pct + "%";
-              if (d.message) setActivity(d.message);
-            }
-          }).catch(() => {});
-      }, 1200);
+      draftEditorEl.value = "";
+      const tid = threadIdEl.value.trim();
       const payload = {
-        thread_id: threadIdEl.value.trim(),
+        thread_id: tid,
         selected_article_id: selectedIdEl.value.trim(),
         human_feedback: feedbackEl.value.trim() || null,
       };
+      const streamPromise = startDraftStream(tid);
       const res = await fetch("/api/resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      clearInterval(progInterval);
       const data = await res.json();
       if (!res.ok) {
         progressSectionEl.style.display = "none";
         throw new Error(data.detail || "Failed to resume flow");
       }
       applyState(data.state, data.history || []);
+    }
+
+    async function startDraftStream(threadId) {
+      const evtSource = new EventSource(`/api/stream/${encodeURIComponent(threadId)}`);
+      evtSource.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.done) {
+            evtSource.close();
+            return;
+          }
+          if (msg.tokens) {
+            draftEditorEl.value += msg.tokens.join("");
+            draftEditorEl.scrollTop = draftEditorEl.scrollHeight;
+          }
+        } catch (_) {}
+      };
+      evtSource.onerror = () => { evtSource.close(); };
     }
 
     async function withUiErrors(fn) {
@@ -1180,6 +1367,96 @@ __OLLAMA_OPTIONS__
     document.getElementById("reset-btn").addEventListener("click", () => withUiErrors(resetThread));
     document.getElementById("add-domain-btn").addEventListener("click", addDomain);
 
+    async function refineDraft(instruction) {
+      const current = draftEditorEl.value || "";
+      if (!current || current === "No draft yet.") {
+        alert("No draft to refine. Generate a draft first.");
+        return;
+      }
+      const tid = threadIdEl.value.trim();
+      setActivity(`Refining: ${instruction}...`);
+      const res = await fetch("/api/refine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ thread_id: tid, instruction, current_draft: current }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Refinement failed");
+      draftEditorEl.value = data.refined_draft;
+      setActivity("Draft refined.");
+    }
+
+    document.getElementById("refine-hook").addEventListener("click", () => withBusyButton(document.getElementById("refine-hook"), "...", () => withUiErrors(() => refineDraft("Make the hook punchier and more contrarian. Start with a blunt, provocative statement."))));
+    document.getElementById("refine-shorten").addEventListener("click", () => withBusyButton(document.getElementById("refine-shorten"), "...", () => withUiErrors(() => refineDraft("Shorten this draft. Cut filler words, tighten sentences, and get closer to 150 words while keeping the core message."))));
+    document.getElementById("refine-technical").addEventListener("click", () => withBusyButton(document.getElementById("refine-technical"), "...", () => withUiErrors(() => refineDraft("Make this more technical. Add specific implementation details, architecture tradeoffs, or engineering considerations. Use precise technical terminology."))));
+    document.getElementById("refine-cta").addEventListener("click", () => withBusyButton(document.getElementById("refine-cta"), "...", () => withUiErrors(() => refineDraft("Strengthen the closing. End with a provocative, opinionated question that invites debate from technical peers."))));
+    document.getElementById("refine-grammar").addEventListener("click", () => withBusyButton(document.getElementById("refine-grammar"), "...", () => withUiErrors(() => refineDraft("Fix grammar, spelling, and punctuation. Improve sentence flow and readability without changing the content or tone."))));
+
+    async function loadScheduledRuns() {
+      const res = await fetch("/api/scheduled-runs");
+      const data = await res.json();
+      if (!data.ok || !data.runs || !data.runs.length) {
+        document.getElementById("scheduled-runs").innerHTML = "<span class='muted'>No scheduled runs yet.</span>";
+        return;
+      }
+      const html = data.runs.map(r => {
+        const runId = (r.run_id || "").replace(/</g, "&lt;");
+        const topic = (r.topic || "").replace(/</g, "&lt;");
+        const triggered = (r.triggered_at || "").replace(/</g, "&lt;");
+        const emailed = r.email_sent_at ? "yes" : "no";
+        const reviewed = r.reviewed_at ? "yes" : "no";
+        const reviewBtn = r.reviewed_at
+          ? ""
+          : `<button class="alt" style="width:auto; padding:4px 10px; font-size:12px;" onclick="markRunReviewed('${runId}', event)">Mark Reviewed</button>`;
+        return `<div class="history-item" style="cursor:pointer;" onclick="loadScheduledRun('${runId}')">
+          <div><strong>${runId}</strong></div>
+          <div class="muted">Topic: ${topic}</div>
+          <div class="history-meta" style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span>Triggered: ${triggered} | Emailed: ${emailed} | Reviewed: ${reviewed}</span>
+            ${reviewBtn}
+          </div>
+        </div>`;
+      }).join("");
+      document.getElementById("scheduled-runs").innerHTML = html;
+    }
+
+    async function markRunReviewed(runId, event) {
+      if (event) event.stopPropagation();
+      const res = await fetch(`/api/scheduled-runs/${encodeURIComponent(runId)}/review`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.detail || "Failed to mark run reviewed");
+        return;
+      }
+      loadScheduledRuns();
+    }
+    window.markRunReviewed = markRunReviewed;
+
+    async function loadScheduledRun(runId) {
+      setActivity(`Loading scheduled run ${runId}...`);
+      const res = await fetch(`/api/scheduled-runs/${encodeURIComponent(runId)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.detail || "Failed to load run");
+        return;
+      }
+      threadIdEl.value = data.run.thread_id;
+      selectedIdEl.value = "";
+      const candidates = data.run.candidates || [];
+      renderCandidates(candidates);
+      resetSteps();
+      setFlowStep("approval");
+      setActivity(`Switched to scheduled run ${runId} (thread: ${data.run.thread_id}). Loaded ${candidates.length} candidates. Select one and generate a draft.`);
+    }
+    window.loadScheduledRun = loadScheduledRun;
+
+    loadScheduledRuns();
+
+    const deepLinkRunId = new URLSearchParams(window.location.search).get("run");
+    if (deepLinkRunId) {
+      loadScheduledRun(deepLinkRunId);
+    }
+
     function updateModelList(providerId, inputId) {
       const provider = document.getElementById(providerId).value;
       const input = document.getElementById(inputId);
@@ -1198,6 +1475,7 @@ __OLLAMA_OPTIONS__
     setFlowStep("scout");
     setActivity("Ready.");
     renderDomainList();
+    hydrateDomainsFromServer();
     updateModelList("analyst-provider", "analyst-model");
     updateModelList("writer-provider", "writer-model");
   </script>
@@ -1282,6 +1560,8 @@ def get_progress(thread_id: str) -> Dict[str, Any]:
         "current_source": data.get("current_source", ""),
         "completed_sources": data.get("completed_sources", 0),
         "total_sources": data.get("total_sources", 0),
+        "source_log": list(data.get("source_log") or []),
+        "source_results": list(data.get("source_results") or []),
     }
 
 
@@ -1300,7 +1580,14 @@ def resume_flow(payload: ResumeRequest) -> Dict[str, Any]:
 
     config = _config(payload.thread_id)
     try:
-        graph_app.invoke(Command(resume=resume_payload), config=config)
+        if payload.action:
+            graph_app.invoke(Command(resume=resume_payload), config=config)
+        else:
+            current_state = graph_app.get_state(config)
+            next_nodes = list(current_state.next) if current_state.next else []
+            if "edit_approval" in next_nodes:
+                graph_app.invoke(Command(resume={"action": "pick_another"}), config=config)
+            graph_app.invoke(Command(resume=resume_payload), config=config)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1409,6 +1696,106 @@ def favicon():
   <text x="16" y="23" font-family="sans-serif" font-size="20" font-weight="bold" fill="white" text-anchor="middle">AP</text>
 </svg>"""
     return Response(content=svg, media_type="image/svg+xml")
+
+
+@web_app.get("/api/stream/{thread_id}")
+async def stream_draft(thread_id: str):
+    async def event_generator():
+        last_idx = 0
+        max_iterations = int(SSE_STREAM_TIMEOUT_SECONDS / SSE_POLL_INTERVAL_SECONDS)
+        for _ in range(max_iterations):
+            tokens = progress_tracker.get_stream_tokens(thread_id)
+            new_tokens = tokens[last_idx:]
+            last_idx = len(tokens)
+            if new_tokens:
+                yield f"data: {_json.dumps({'tokens': new_tokens})}\n\n"
+            if progress_tracker.is_stream_done(thread_id):
+                yield f"data: {_json.dumps({'done': True})}\n\n"
+                return
+            await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
+        yield f"data: {_json.dumps({'done': True})}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@web_app.post("/api/refine")
+def refine_draft(payload: RefineRequest) -> Dict[str, Any]:
+    config = _config(payload.thread_id)
+    state = graph_app.get_state(config)
+    values = state.values if isinstance(state.values, dict) else {}
+    writer_provider = values.get("writer_provider", "ollama")
+    writer_model = values.get("writer_model")
+    writer_llm = _get_chat_model(writer_provider, role="refine", model_override=writer_model)
+
+    prompt = f"""You are a senior CTO and Ph.D. refining a LinkedIn draft. Apply the following instruction to the draft below. Return ONLY the revised draft text — no explanations, no markdown, no commentary.
+
+Instruction: {payload.instruction}
+
+Current draft:
+{payload.current_draft}"""
+
+    refined = str(writer_llm.invoke(prompt).content)
+    return {"ok": True, "refined_draft": refined}
+
+
+@web_app.get("/api/scheduled-runs")
+def list_scheduled_runs() -> Dict[str, Any]:
+    runs = scheduled_store.list_runs()
+    return {"ok": True, "runs": runs}
+
+
+@web_app.get("/api/scheduled-runs/{run_id}")
+def get_scheduled_run(run_id: str) -> Dict[str, Any]:
+    run = scheduled_store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    return {"ok": True, "run": run}
+
+
+@web_app.post("/api/scheduled-runs/{run_id}/review")
+def mark_scheduled_run_reviewed(run_id: str) -> Dict[str, Any]:
+    scheduled_store.mark_reviewed(run_id)
+    return {"ok": True}
+
+
+@web_app.get("/api/scheduled-runs/{run_id}/skip", response_class=HTMLResponse)
+def skip_scheduled_run(run_id: str) -> str:
+    # GET (not POST) so this can be a plain clickable link from the digest email.
+    scheduled_store.mark_reviewed(run_id)
+    return (
+        f"<p style=\"font-family:sans-serif;\">Run <code>{escape(run_id)}</code> marked as "
+        "reviewed/skipped. You can close this tab.</p>"
+    )
+
+
+@web_app.get("/api/scheduler/status")
+def scheduler_status() -> Dict[str, Any]:
+    return {"ok": True, "running": scheduler.is_running()}
+
+
+@web_app.get("/api/domains")
+def get_domains() -> Dict[str, Any]:
+    rows = domain_store.get_domains()
+    return {
+        "ok": True,
+        "domains": [r["domain"] for r in rows],
+        "disabled": [r["domain"] for r in rows if not r["enabled"]],
+    }
+
+
+@web_app.post("/api/domains")
+def save_domains(payload: DomainsRequest) -> Dict[str, Any]:
+    domain_store.save_domains(payload.domains, payload.disabled)
+    return {"ok": True}
+
+
+@web_app.on_event("startup")
+def on_startup() -> None:
+    scheduler.start_scheduler()
+
+
+@web_app.on_event("shutdown")
+def on_shutdown() -> None:
+    scheduler.stop_scheduler()
 
 
 @web_app.get("/healthz")

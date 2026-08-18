@@ -29,8 +29,7 @@ def _print_shortlist(result: Dict[str, Any]) -> None:
 
 
 def _assert_env() -> None:
-    # Tavily is now optional because scout can run RSS-only routes.
-    # Runtime provider-specific key failures are surfaced by each node.
+    # Scout is RSS/Google-News based; provider-specific key failures surface by node.
     return
 
 
@@ -58,7 +57,7 @@ def main() -> None:
     parser.add_argument(
         "--topic",
         default=get_default_topic(),
-        help="Search topic for Tavily",
+        help="Search topic for RSS/Google News scouting",
     )
     parser.add_argument(
         "--include-domains",
@@ -105,8 +104,8 @@ def main() -> None:
     parser.add_argument(
         "--action",
         default=None,
-        choices=["publish", "edit", "pick_another"],
-        help="Action for draft review approval (publish, edit, pick_another)",
+        choices=["publish", "edit", "pick_another", "done"],
+        help="Action for draft review approval (publish, edit, pick_another, done)",
     )
     parser.add_argument(
         "--edited-draft",
@@ -175,11 +174,12 @@ def main() -> None:
             draft = values.get("final_draft", "")
             print("\nDraft produced — review and choose action:\n")
             print(draft[:600] + ("..." if len(draft) > 600 else ""))
-            print("\nAvailable actions: publish, edit, pick_another")
+            print("\nAvailable actions: publish, edit, pick_another, done")
             print("To resume:")
             print(f"  python main.py --thread-id {args.thread_id} --action publish")
             print(f"  python main.py --thread-id {args.thread_id} --action edit --edited-draft '...'")
             print(f"  python main.py --thread-id {args.thread_id} --action pick_another")
+            print(f"  python main.py --thread-id {args.thread_id} --action done")
         else:
             print("\nGraph interrupted in approval node (as intended).")
             values = state.values if isinstance(state.values, dict) else {}
