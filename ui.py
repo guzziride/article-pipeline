@@ -1,12 +1,13 @@
 import os
 import asyncio
 import json as _json
+import secrets
 from datetime import datetime, timezone
 from html import escape
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.types import Command
@@ -17,7 +18,10 @@ import draft_store
 import domain_store
 import scheduled_store
 import scheduler
-from graph import _get_chat_model, build_graph
+import cost_tracker
+import style_profile
+import dashboard
+from graph import DEFAULT_PERSONA, DEFAULT_FORMAT, PERSONAS, FORMATS, _capture_usage, _get_chat_model, _resolve_model_name, build_graph
 from settings import get_default_topic, get_ollama_model_options
 
 
@@ -41,6 +45,8 @@ class StartRequest(BaseModel):
     writer_provider: str = Field(default="ollama")
     analyst_model: Optional[str] = Field(default=None)
     writer_model: Optional[str] = Field(default=None)
+    persona: str = Field(default="cto_phd")
+    format: str = Field(default="post")
     include_domains: Optional[List[str]] = Field(default=None)
 
 
@@ -72,6 +78,28 @@ class DomainsRequest(BaseModel):
     disabled: List[str] = Field(default_factory=list)
 
 
+class WebhookStartRequest(BaseModel):
+    topic: Optional[str] = Field(default=None)
+    include_domains: Optional[List[str]] = Field(default=None)
+    analyst_provider: Optional[str] = Field(default=None)
+    writer_provider: Optional[str] = Field(default=None)
+    analyst_model: Optional[str] = Field(default=None)
+    writer_model: Optional[str] = Field(default=None)
+    persona: Optional[str] = Field(default=None)
+    format: Optional[str] = Field(default=None)
+
+
+class StyleRuleRequest(BaseModel):
+    rule_text: str = Field(...)
+    persona: str = Field(default="*")
+    source: str = Field(default="manual")
+
+
+class StyleRuleUpdateRequest(BaseModel):
+    rule_text: Optional[str] = Field(default=None)
+    persona: Optional[str] = Field(default=None)
+
+
 def _config(thread_id: str) -> Dict[str, Any]:
     return {"configurable": {"thread_id": thread_id}}
 
@@ -88,6 +116,8 @@ def _state_snapshot(thread_id: str) -> Dict[str, Any]:
         "writer_provider": values.get("writer_provider"),
         "analyst_model": values.get("analyst_model"),
         "writer_model": values.get("writer_model"),
+        "persona": values.get("persona"),
+        "format": values.get("format"),
         "raw_articles": values.get("raw_articles", []),
         "scout_debug": values.get("scout_debug", {}),
         "curated_candidates": values.get("curated_candidates", []),
@@ -95,6 +125,7 @@ def _state_snapshot(thread_id: str) -> Dict[str, Any]:
         "human_feedback": values.get("human_feedback"),
         "final_draft": values.get("final_draft"),
         "published_drafts": draft_store.get_drafts(thread_id),
+        "draft_versions": draft_store.get_versions(thread_id),
     }
 
 
@@ -376,9 +407,38 @@ def index() -> str:
       color: #475569;
       margin-top: 4px;
     }
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 1000;
+      max-width: min(360px, calc(100vw - 40px));
+    }
+    .toast {
+      padding: 12px 16px;
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(19, 33, 68, 0.18);
+      font-size: 14px;
+      line-height: 1.4;
+      color: #fff;
+      background: var(--ink);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 160ms ease, transform 160ms ease;
+      cursor: pointer;
+      word-break: break-word;
+    }
+    .toast.toast-visible { opacity: 1; transform: translateY(0); }
+    .toast.toast-error { background: #b91c1c; }
+    .toast.toast-success { background: #0f766e; }
+    .toast.toast-info { background: #334155; }
   </style>
 </head>
 <body>
+  <div id="toast-container"></div>
   <div class="wrap">
     <section class="card">
       <h1>Article Pipeline HITL Console</h1>
@@ -405,8 +465,22 @@ def index() -> str:
             <option value="ollama" selected>ollama</option>
           </select>
         </div>
-        <div><label>Analyst Model (optional override)</label><input id="analyst-model" list="ollama-models" placeholder="e.g. gemini-2.0-flash or llama3.1" /></div>
+        <div><label>Analyst Model (optional override)</label><input id="analyst-model" list="ollama-models" placeholder="e.g. gemini-3.6-flash or llama3.1" /></div>
         <div><label>Writer Model (optional override)</label><input id="writer-model" list="ollama-models" placeholder="e.g. gpt-4o or llama3.1" /></div>
+        <div><label>Persona</label>
+          <select id="persona-select">
+            <option value="cto_phd" selected>CTO / PhD (Technical Authority)</option>
+            <option value="startup_founder">Startup Founder (Scrappy/Growth)</option>
+            <option value="practitioner_engineer">Practitioner Engineer (Hands-On)</option>
+          </select>
+        </div>
+        <div><label>Format</label>
+          <select id="format-select">
+            <option value="post" selected>Single Post</option>
+            <option value="thread">Thread (5-7 posts)</option>
+            <option value="carousel">Carousel (6-8 slides)</option>
+          </select>
+        </div>
       </div>
       <datalist id="ollama-models">
 __OLLAMA_OPTIONS__
@@ -418,9 +492,9 @@ __OLLAMA_OPTIONS__
         <option value="o1-mini">
       </datalist>
       <datalist id="gemini-models">
+        <option value="gemini-3.6-flash">
         <option value="gemini-2.5-flash">
         <option value="gemini-2.5-pro">
-        <option value="gemini-2.0-flash">
       </datalist>
       <datalist id="groq-models">
         <option value="llama-3.1-8b-instant">
@@ -448,6 +522,21 @@ __OLLAMA_OPTIONS__
         <button id="refresh-btn" class="alt">Refresh State</button>
         <button id="reset-btn" class="alt" style="background:#dc2626;">Reset Thread</button>
       </div>
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer; font-weight:bold;">Style Rules (persistent voice preferences)</summary>
+        <p class="muted" style="margin:8px 0 0;">Plain-text rules injected into every author + refine prompt. Persona <code>*</code> applies to all; a specific persona only applies when selected. Rules are advisory — the LLM may deviate.</p>
+        <div class="row" style="gap:6px; flex-wrap:wrap; margin-top:8px;">
+          <input id="new-style-rule" placeholder="e.g. keep posts under 200 words, avoid exclamation marks" style="flex:1 1 240px;" />
+          <select id="new-rule-persona" style="flex:0 0 auto; width:auto;">
+            <option value="*">*</option>
+            <option value="cto_phd">cto_phd</option>
+            <option value="startup_founder">startup_founder</option>
+            <option value="practitioner_engineer">practitioner_engineer</option>
+          </select>
+          <button id="add-rule-btn" class="alt" type="button" style="flex:0 0 auto;">Add Rule</button>
+        </div>
+        <div id="style-rules-list" class="muted" style="margin-top:8px;">No style rules yet.</div>
+      </details>
       <div class="progress-wrap">
         <div id="activity-text" class="muted">Ready.</div>
         <div class="progress-row" style="margin-top:8px;">
@@ -516,6 +605,8 @@ __OLLAMA_OPTIONS__
         <button id="pick-another-btn" class="alt">Pick Another Article</button>
         <button id="open-linkedin-btn" class="alt" style="background:#0a66c2;">Open LinkedIn Post</button>
         <button id="copy-draft-btn" class="alt">Copy Draft</button>
+        <button id="download-txt-btn" class="alt">Download .txt</button>
+        <button id="download-md-btn" class="alt">Download .md</button>
       </div>
       <p class="muted" style="margin-top:8px;">
         <strong>Approve & Publish</strong> — marks draft as published.<br/>
@@ -524,6 +615,15 @@ __OLLAMA_OPTIONS__
         <strong>Open LinkedIn Post</strong> — opens LinkedIn composer with draft content.
       </p>
       <div id="factuality-notes" class="muted" style="margin-top:10px; padding:8px; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; display:none;"></div>
+      <div id="cost-summary" class="muted" style="margin-top:6px; font-size:13px; display:none;"></div>
+      <div style="margin-top:14px;">
+        <label>Hashtag Library</label>
+        <div id="hashtag-chips" class="row" style="gap:6px; flex-wrap:wrap; margin-top:6px;"></div>
+      </div>
+      <details style="margin-top:14px;">
+        <summary style="cursor:pointer; font-weight:bold;">Version History</summary>
+        <div id="draft-versions" class="muted" style="margin-top:10px;">No versions yet.</div>
+      </details>
       <h3 style="margin-top:14px;">Published Drafts (This Thread)</h3>
       <div id="published-drafts" class="muted">None published yet.</div>
     </section>
@@ -537,6 +637,19 @@ __OLLAMA_OPTIONS__
     <section class="card">
       <h2>Live State JSON</h2>
       <pre id="state-json">{}</pre>
+    </section>
+
+    <section class="card">
+      <details>
+        <summary style="cursor:pointer; font-weight:bold; font-size:18px;"><h2 style="display:inline; margin:0;">Performance Dashboard</h2></summary>
+        <p class="muted" style="margin-top:8px;">Aggregate views across all runs: cost, throughput, topics, and style rule usage. Read-only.</p>
+        <div class="row" style="gap:8px; flex-wrap:wrap; margin-top:8px; align-items:center;">
+          <label style="font-size:13px;">Days:</label>
+          <input id="dashboard-days" type="number" value="30" min="1" max="365" style="width:70px;" />
+          <button id="refresh-dashboard-btn" class="alt" type="button">Refresh Dashboard</button>
+        </div>
+        <div id="dashboard-content" class="muted" style="margin-top:10px;">No dashboard data loaded. Click Refresh.</div>
+      </details>
     </section>
 
     <section class="card">
@@ -589,6 +702,8 @@ __OLLAMA_OPTIONS__
     const writerProviderEl = document.getElementById("writer-provider");
     const analystModelEl = document.getElementById("analyst-model");
     const writerModelEl = document.getElementById("writer-model");
+    const personaSelectEl = document.getElementById("persona-select");
+    const formatSelectEl = document.getElementById("format-select");
     const newDomainEl = document.getElementById("new-domain");
     const domainListEl = document.getElementById("domain-list");
     const selectedIdEl = document.getElementById("selected-id");
@@ -621,6 +736,13 @@ __OLLAMA_OPTIONS__
     ];
     const STORAGE_DOMAINS_KEY = "article_pipeline_domains";
     const STORAGE_DISABLED_KEY = "article_pipeline_domains_disabled";
+
+    const HASHTAG_LIBRARY = [
+      "#AgenticAI", "#MCP", "#SaaS", "#LLMOps", "#DistributedSystems",
+      "#DevOps", "#SoftwareArchitecture", "#TechLeadership", "#MachineLearning",
+      "#AIInfrastructure", "#Observability", "#PlatformEngineering", "#Kubernetes",
+      "#OpenSource", "#EngineeringLeadership", "#ProductionAI",
+    ];
 
     function normalizeDomain(value) {
       const raw = (value || "").trim().toLowerCase();
@@ -837,6 +959,20 @@ __OLLAMA_OPTIONS__
 
     function setActivity(text) {
       activityTextEl.textContent = text || "Ready.";
+    }
+
+    function toast(message, type = "info", duration = 4000) {
+      const container = document.getElementById("toast-container");
+      const el = document.createElement("div");
+      el.className = `toast toast-${type}`;
+      el.textContent = message;
+      el.addEventListener("click", () => el.remove());
+      container.appendChild(el);
+      requestAnimationFrame(() => el.classList.add("toast-visible"));
+      setTimeout(() => {
+        el.classList.remove("toast-visible");
+        setTimeout(() => el.remove(), 200);
+      }, duration);
     }
 
     function resetSteps() {
@@ -1061,6 +1197,8 @@ __OLLAMA_OPTIONS__
       if (state.writer_model) {
         writerModelEl.value = state.writer_model;
       }
+      personaSelectEl.value = state.persona || "cto_phd";
+      formatSelectEl.value = state.format || "post";
       syncDomainsFromState(state.include_domains || []);
       const draftContent = state.final_draft || "";
       if (draftContent) {
@@ -1068,6 +1206,9 @@ __OLLAMA_OPTIONS__
       } else {
         draftEditorEl.value = "";
       }
+      renderHashtagChips();
+      CURRENT_DRAFT_VERSIONS = state.draft_versions || [];
+      renderDraftVersions(CURRENT_DRAFT_VERSIONS);
       renderPublishedDrafts(state.published_drafts || []);
       const factualityEl = document.getElementById("factuality-notes");
       const notes = (state.scout_debug && state.scout_debug.factuality_notes) || "";
@@ -1076,6 +1217,33 @@ __OLLAMA_OPTIONS__
         factualityEl.innerHTML = "<strong>Factuality Check:</strong> " + notes.replace(/</g, "&lt;");
       } else {
         factualityEl.style.display = "none";
+      }
+      refreshCostSummary();
+    }
+
+    async function refreshCostSummary() {
+      const threadId = threadIdEl.value.trim();
+      const costEl = document.getElementById("cost-summary");
+      if (!threadId) {
+        costEl.style.display = "none";
+        return;
+      }
+      try {
+        const res = await fetch(`/api/costs/${encodeURIComponent(threadId)}`);
+        const data = await res.json();
+        if (!res.ok || !data.total_cost_usd) {
+          costEl.style.display = "none";
+          return;
+        }
+        const prefix = data.estimated ? "~" : "";
+        const parts = Object.entries(data.by_node || {}).map(
+          ([node, v]) => `${node} ${v.estimated ? "~" : ""}$${v.cost_usd.toFixed(4)}`
+        );
+        costEl.textContent = `Est. cost this thread: ${prefix}$${data.total_cost_usd.toFixed(4)}` +
+          (parts.length ? ` (${parts.join(", ")})` : "");
+        costEl.style.display = "block";
+      } catch (_) {
+        costEl.style.display = "none";
       }
     }
 
@@ -1128,6 +1296,83 @@ __OLLAMA_OPTIONS__
       el.innerHTML = html;
     }
 
+    function renderDraftVersions(versions) {
+      const el = document.getElementById("draft-versions");
+      if (!versions || !versions.length) {
+        el.innerHTML = "<span class='muted'>No versions yet.</span>";
+        return;
+      }
+      const html = versions.slice().reverse().map((v, idxFromTop) => {
+        const idx = versions.length - 1 - idxFromTop;
+        const source = (v.source || "").replace(/</g, "&lt;");
+        const at = (v.created_at || "").replace(/</g, "&lt;");
+        const draftText = (v.draft || "").replace(/</g, "&lt;");
+        const preview = draftText.length > 160 ? draftText.slice(0, 160) + "..." : draftText;
+        return `
+          <div class="history-item" style="cursor:pointer;" onclick="loadDraftVersion(${idx})">
+            <div><strong>${source}</strong> <span class="muted">&middot; ${at}</span></div>
+            <div class="muted" style="margin-top:4px; white-space:pre-wrap;">${preview}</div>
+          </div>
+        `;
+      }).join("");
+      el.innerHTML = html;
+    }
+
+    let CURRENT_DRAFT_VERSIONS = [];
+
+    function loadDraftVersion(idx) {
+      const version = CURRENT_DRAFT_VERSIONS[idx];
+      if (!version) return;
+      draftEditorEl.value = version.draft;
+      renderHashtagChips();
+      toast(`Loaded version: ${version.source}`, "info");
+    }
+    window.loadDraftVersion = loadDraftVersion;
+
+    function renderHashtagChips() {
+      const container = document.getElementById("hashtag-chips");
+      const current = draftEditorEl.value || "";
+      container.innerHTML = HASHTAG_LIBRARY.map((tag) => {
+        const active = current.includes(tag);
+        const style = active
+          ? "flex:0 0 auto; padding:4px 10px; font-size:12px; background:#0e7490;"
+          : "flex:0 0 auto; padding:4px 10px; font-size:12px; background:#94a3b8;";
+        return `<button class="alt" style="${style}" onclick="toggleHashtag('${tag}')">${tag}</button>`;
+      }).join("");
+    }
+
+    function toggleHashtag(tag) {
+      const current = draftEditorEl.value || "";
+      if (current.includes(tag)) {
+        draftEditorEl.value = current.split(tag).join("").replace(/[ \\t]+\\n/g, "\\n").replace(/\\s+$/, "");
+      } else {
+        const sep = current && !current.endsWith("\\n") ? "\\n" : "";
+        draftEditorEl.value = current + sep + tag;
+      }
+      renderHashtagChips();
+    }
+    window.toggleHashtag = toggleHashtag;
+
+    function downloadDraft(filename, mimeType) {
+      const text = draftEditorEl.value || "";
+      if (!text || text === "No draft yet.") {
+        toast("No draft available to download yet.", "error");
+        return;
+      }
+      const blob = new Blob([text], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    document.getElementById("download-txt-btn").addEventListener("click", () => downloadDraft("draft.txt", "text/plain"));
+    document.getElementById("download-md-btn").addEventListener("click", () => downloadDraft("draft.md", "text/markdown"));
+
     async function loadDraft(idx) {
       const threadId = threadIdEl.value.trim();
       if (!threadId) return;
@@ -1135,7 +1380,7 @@ __OLLAMA_OPTIONS__
       const res = await fetch(`/api/published-draft/load/${encodeURIComponent(threadId)}/${idx}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.detail || "Failed to load draft");
+        toast(data.detail || "Failed to load draft", "error");
         return;
       }
       applyState(data.state, data.history || []);
@@ -1149,7 +1394,7 @@ __OLLAMA_OPTIONS__
       const res = await fetch(`/api/published-draft/delete/${encodeURIComponent(threadId)}/${idx}`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.detail || "Failed to delete draft");
+        toast(data.detail || "Failed to delete draft", "error");
         return;
       }
       applyState(data.state, data.history || []);
@@ -1159,17 +1404,17 @@ __OLLAMA_OPTIONS__
     async function copyDraftMarkdown() {
       const text = draftEditorEl.value || "";
       if (!text || text === "No draft yet.") {
-        alert("No draft available to copy yet.");
+        toast("No draft available to copy yet.", "error");
         return;
       }
       await navigator.clipboard.writeText(text);
-      alert("Draft copied to clipboard.");
+      toast("Draft copied to clipboard.", "success");
     }
 
     async function openLinkedIn() {
       const text = draftEditorEl.value || "";
       if (!text || text === "No draft yet.") {
-        alert("No draft to post. Generate a draft first.");
+        toast("No draft to post. Generate a draft first.", "error");
         return;
       }
       const url = "https://www.linkedin.com/post/new/?content=" + encodeURIComponent(text);
@@ -1194,7 +1439,7 @@ __OLLAMA_OPTIONS__
     async function saveEditDraft() {
       const edited = draftEditorEl.value || "";
       if (!edited.trim()) {
-        alert("Draft is empty. Write something before saving.");
+        toast("Draft is empty. Write something before saving.", "error");
         return;
       }
       const payload = {
@@ -1250,7 +1495,10 @@ __OLLAMA_OPTIONS__
       domainDiagnosticsEl.innerHTML = "<span class='muted'>No domain diagnostics yet.</span>";
       historyEl.innerHTML = "<span class='muted'>No history yet.</span>";
       document.getElementById("published-drafts").innerHTML = "<span class='muted'>None published yet.</span>";
-      alert(data.message || "Thread reset.");
+      CURRENT_DRAFT_VERSIONS = [];
+      renderDraftVersions([]);
+      renderHashtagChips();
+      toast(data.message || "Thread reset.", "success");
     }
 
     async function startFlow() {
@@ -1263,6 +1511,8 @@ __OLLAMA_OPTIONS__
         writer_provider: writerProviderEl.value,
         analyst_model: analystModelEl.value.trim() || null,
         writer_model: writerModelEl.value.trim() || null,
+        persona: personaSelectEl.value,
+        format: formatSelectEl.value,
       };
       const res = await fetch("/api/start", {
         method: "POST",
@@ -1350,7 +1600,7 @@ __OLLAMA_OPTIONS__
         await fn();
       } catch (err) {
         stopStartProgressAnimation();
-        alert(err.message || String(err));
+        toast(err.message || String(err), "error", 6000);
         setActivity(`Action failed: ${err.message || String(err)}`);
       }
     }
@@ -1370,7 +1620,7 @@ __OLLAMA_OPTIONS__
     async function refineDraft(instruction) {
       const current = draftEditorEl.value || "";
       if (!current || current === "No draft yet.") {
-        alert("No draft to refine. Generate a draft first.");
+        toast("No draft to refine. Generate a draft first.", "error");
         return;
       }
       const tid = threadIdEl.value.trim();
@@ -1384,6 +1634,40 @@ __OLLAMA_OPTIONS__
       if (!res.ok) throw new Error(data.detail || "Refinement failed");
       draftEditorEl.value = data.refined_draft;
       setActivity("Draft refined.");
+      offerPromoteRefine(instruction);
+    }
+
+    function offerPromoteRefine(instruction) {
+      // One-click promote: offer to save the refine instruction as a style rule.
+      // Auto-dismisses after 6s. Not auto-saved — user must click.
+      const container = document.getElementById("toast-container");
+      const el = document.createElement("div");
+      el.className = "toast toast-info";
+      el.style.cursor = "default";
+      el.innerHTML = `<span>Save this as a style rule?</span>
+        <button class="alt" style="width:auto; padding:3px 10px; font-size:12px; margin-left:10px;">Save</button>`;
+      const btn = el.querySelector("button");
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const persona = personaSelectEl.value || "*";
+        const r = await fetch("/api/style-rules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rule_text: instruction, persona, source: "feedback" }),
+        });
+        const d = await r.json();
+        if (!r.ok) { toast(d.detail || "Failed to save rule", "error"); return; }
+        toast("Saved as style rule.", "success");
+        el.remove();
+        loadStyleRules();
+      });
+      el.addEventListener("click", () => el.remove());
+      container.appendChild(el);
+      requestAnimationFrame(() => el.classList.add("toast-visible"));
+      setTimeout(() => {
+        el.classList.remove("toast-visible");
+        setTimeout(() => el.remove(), 200);
+      }, 6000);
     }
 
     document.getElementById("refine-hook").addEventListener("click", () => withBusyButton(document.getElementById("refine-hook"), "...", () => withUiErrors(() => refineDraft("Make the hook punchier and more contrarian. Start with a blunt, provocative statement."))));
@@ -1425,7 +1709,7 @@ __OLLAMA_OPTIONS__
       const res = await fetch(`/api/scheduled-runs/${encodeURIComponent(runId)}/review`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.detail || "Failed to mark run reviewed");
+        toast(data.detail || "Failed to mark run reviewed", "error");
         return;
       }
       loadScheduledRuns();
@@ -1437,7 +1721,7 @@ __OLLAMA_OPTIONS__
       const res = await fetch(`/api/scheduled-runs/${encodeURIComponent(runId)}`);
       const data = await res.json();
       if (!res.ok) {
-        alert(data.detail || "Failed to load run");
+        toast(data.detail || "Failed to load run", "error");
         return;
       }
       threadIdEl.value = data.run.thread_id;
@@ -1450,7 +1734,86 @@ __OLLAMA_OPTIONS__
     }
     window.loadScheduledRun = loadScheduledRun;
 
+    // ---------- Style Rules ----------
+    async function loadStyleRules() {
+      try {
+        const res = await fetch("/api/style-rules");
+        const data = await res.json();
+        if (!res.ok) return;
+        renderStyleRules(data.rules || []);
+      } catch (_) {}
+    }
+
+    function renderStyleRules(rules) {
+      const el = document.getElementById("style-rules-list");
+      if (!rules || !rules.length) {
+        el.innerHTML = "<span class='muted'>No style rules yet.</span>";
+        return;
+      }
+      const esc = (s) => String(s || "").replace(/</g, "&lt;");
+      const html = rules.map((r) => {
+        const text = esc(r.rule_text);
+        const persona = esc(r.persona);
+        const src = esc(r.source);
+        const applied = r.applied_count || 0;
+        const dis = r.disabled ? " (disabled)" : "";
+        const toggleLabel = r.disabled ? "Enable" : "Disable";
+        return `
+          <div class="history-item" style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; ${r.disabled ? 'opacity:0.55;' : ''}">
+            <div style="min-width:0; overflow-wrap:anywhere;">
+              <div><strong>${text}</strong> <span class="muted">&middot; persona: ${persona} &middot; src: ${src} &middot; applied: ${applied}${dis}</span></div>
+            </div>
+            <div style="flex:0 0 auto; display:flex; gap:4px;">
+              <button class="alt" style="width:auto; padding:3px 8px; font-size:11px;" onclick="toggleStyleRule(${r.id})">${toggleLabel}</button>
+              <button class="alt" style="width:auto; padding:3px 8px; font-size:11px; background:#dc2626;" onclick="deleteStyleRule(${r.id})">Delete</button>
+            </div>
+          </div>`;
+      }).join("");
+      el.innerHTML = html;
+    }
+
+    async function addStyleRule() {
+      const input = document.getElementById("new-style-rule");
+      const personaSel = document.getElementById("new-rule-persona");
+      const text = input.value.trim();
+      if (!text) { toast("Rule text cannot be empty.", "error"); return; }
+      const res = await fetch("/api/style-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rule_text: text, persona: personaSel.value, source: "manual" }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast(data.detail || "Failed to add rule", "error"); return; }
+      input.value = "";
+      toast("Style rule added.", "success");
+      loadStyleRules();
+    }
+
+    async function toggleStyleRule(ruleId) {
+      const res = await fetch(`/api/style-rules/${ruleId}/toggle`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) { toast(data.detail || "Failed to toggle rule", "error"); return; }
+      loadStyleRules();
+    }
+
+    async function deleteStyleRule(ruleId) {
+      const res = await fetch(`/api/style-rules/${ruleId}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) { toast(data.detail || "Failed to delete rule", "error"); return; }
+      toast("Style rule deleted.", "info");
+      loadStyleRules();
+    }
+
+    window.toggleStyleRule = toggleStyleRule;
+    window.deleteStyleRule = deleteStyleRule;
+
+    document.getElementById("add-rule-btn").addEventListener("click", withUiErrors(addStyleRule));
+    document.getElementById("new-style-rule").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); withUiErrors(addStyleRule)(); }
+    });
+
     loadScheduledRuns();
+    loadStyleRules();
 
     const deepLinkRunId = new URLSearchParams(window.location.search).get("run");
     if (deepLinkRunId) {
@@ -1478,6 +1841,78 @@ __OLLAMA_OPTIONS__
     hydrateDomainsFromServer();
     updateModelList("analyst-provider", "analyst-model");
     updateModelList("writer-provider", "writer-model");
+    // ---------- Performance Dashboard ----------
+    async function loadDashboard() {
+      const el = document.getElementById("dashboard-content");
+      const days = parseInt(document.getElementById("dashboard-days").value, 10) || 30;
+      el.innerHTML = "<span class='muted'>Loading...</span>";
+      try {
+        const res = await fetch(`/api/dashboard?days=${days}`);
+        const data = await res.json();
+        if (!res.ok) { el.innerHTML = "<span class='muted'>Failed to load dashboard.</span>"; return; }
+        renderDashboard(data, days);
+      } catch (err) {
+        el.innerHTML = "<span class='muted'>Failed to load dashboard.</span>";
+      }
+    }
+
+    function renderDashboard(data, days) {
+      const el = document.getElementById("dashboard-content");
+      const esc = (s) => String(s || "").replace(/</g, "&lt;");
+      const fmtCost = (v) => v ? `$${Number(v).toFixed(4)}` : "$0.00";
+      const cost = data.cost || {};
+      const runs = data.runs || {};
+      const drafts = data.drafts || {};
+      const topics = data.topics || {};
+      const style = data.style_rules || {};
+
+      let html = "<h3>Cost (last " + days + " days)</h3>";
+      html += `<div class="muted" style="margin-bottom:6px;">Total: ${fmtCost(cost.total_cost_usd)} across ${cost.call_count || 0} LLM calls</div>`;
+      const nodeRows = Object.entries(cost.by_node || {}).map(([k, v]) =>
+        `<tr><td>${esc(k)}</td><td style="text-align:right;">${fmtCost(v)}</td></tr>`).join("");
+      const provRows = Object.entries(cost.by_provider || {}).map(([k, v]) =>
+        `<tr><td>${esc(k)}</td><td style="text-align:right;">${fmtCost(v)}</td></tr>`).join("");
+      html += `<div class="row" style="gap:16px; flex-wrap:wrap;"><div><table style="border-collapse:collapse; font-size:13px;"><thead><tr><th style="text-align:left;padding:2px 12px 2px 0;">Node</th><th style="text-align:right;padding:2px 0;">Cost</th></tr></thead><tbody>${nodeRows}</tbody></table></div><div><table style="border-collapse:collapse; font-size:13px;"><thead><tr><th style="text-align:left;padding:2px 12px 2px 0;">Provider</th><th style="text-align:right;padding:2px 0;">Cost</th></tr></thead><tbody>${provRows}</tbody></table></div></div>`;
+
+      html += "<h3 style='margin-top:14px;'>Runs</h3>";
+      if (runs.total_runs === 0) {
+        html += "<div class='muted'>No runs in this period.</div>";
+      } else {
+        html += `<div class="muted" style="margin-bottom:6px;">${runs.total_runs} runs | ${runs.total_emailed} emailed (${runs.email_rate}%) | ${runs.total_reviewed} reviewed (${runs.review_rate}%) | avg ${runs.avg_candidates_per_run} candidates/run</div>`;
+        const weekRows = (runs.weekly || []).map(w =>
+          `<tr><td style="padding:2px 12px 2px 0;">${esc(w.week)}</td><td style="text-align:right;padding:2px 8px;">${w.runs}</td><td style="text-align:right;padding:2px 8px;">${w.avg_candidates}</td><td style="text-align:right;padding:2px 0;">${w.review_rate}%</td></tr>`).join("");
+        html += `<table style="border-collapse:collapse; font-size:13px;"><thead><tr><th style="text-align:left;padding:2px 12px 2px 0;">Week</th><th style="text-align:right;padding:2px 8px;">Runs</th><th style="text-align:right;padding:2px 8px;">Avg Cands</th><th style="text-align:right;padding:2px 0;">Reviewed</th></tr></thead><tbody>${weekRows}</tbody></table>`;
+      }
+
+      html += "<h3 style='margin-top:14px;'>Drafts</h3>";
+      if (drafts.total_published === 0) {
+        html += "<div class='muted'>No published drafts in this period.</div>";
+      } else {
+        html += `<div class="muted">${drafts.total_published} published | avg ${drafts.avg_draft_length} chars | ${drafts.refine_count} refines | ${drafts.author_count} author drafts | ${drafts.manual_edit_count} manual edits</div>`;
+      }
+
+      html += "<h3 style='margin-top:14px;'>Topic Distribution</h3>";
+      const topicItems = Object.entries(topics.topics || {}).map(([k, v]) =>
+        `<span class="pill">${esc(k)}: ${v}</span>`).join(" ");
+      html += `<div class="row" style="gap:6px; flex-wrap:wrap;">${topicItems || "<span class='muted'>No topics.</span>"}</div>`;
+
+      html += "<h3 style='margin-top:14px;'>Style Rules</h3>";
+      if (style.total_rules === 0) {
+        html += "<div class='muted'>No style rules defined.</div>";
+      } else {
+        html += `<div class="muted" style="margin-bottom:6px;">${style.active_rules} active, ${style.disabled_rules} disabled</div>`;
+        const ruleRows = (style.rules || []).map(r =>
+          `<tr style="${r.disabled ? 'opacity:0.55;' : ''}"><td style="padding:2px 12px 2px 0;">${esc(r.rule_text)}</td><td style="padding:2px 8px;">${esc(r.persona)}</td><td style="text-align:right;padding:2px 0;">${r.applied_count}</td>${r.disabled ? '<td style="padding:2px 0;font-size:11px;">disabled</td>' : ''}</tr>`).join("");
+        html += `<table style="border-collapse:collapse; font-size:13px;"><thead><tr><th style="text-align:left;padding:2px 12px 2px 0;">Rule</th><th style="text-align:left;padding:2px 8px;">Persona</th><th style="text-align:right;padding:2px 0;">Applied</th></tr></thead><tbody>${ruleRows}</tbody></table>`;
+      }
+
+      el.innerHTML = html;
+    }
+
+    document.getElementById("refresh-dashboard-btn").addEventListener("click", () => withUiErrors(loadDashboard));
+    document.getElementById("dashboard-days").addEventListener("change", () => withUiErrors(loadDashboard));
+
+    renderHashtagChips();
   </script>
 </body>
 </html>
@@ -1499,6 +1934,8 @@ def start_flow(payload: StartRequest) -> Dict[str, Any]:
                 "writer_provider": payload.writer_provider,
                 "analyst_model": payload.analyst_model,
                 "writer_model": payload.writer_model,
+                "persona": payload.persona,
+                "format": payload.format,
                 "thread_id": payload.thread_id,
             },
             config=config,
@@ -1590,6 +2027,9 @@ def resume_flow(payload: ResumeRequest) -> Dict[str, Any]:
             graph_app.invoke(Command(resume=resume_payload), config=config)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if payload.action == "edit" and payload.edited_draft:
+        draft_store.add_version(payload.thread_id, payload.edited_draft, "manual_edit")
 
     state = _state_snapshot(payload.thread_id)
 
@@ -1725,16 +2165,73 @@ def refine_draft(payload: RefineRequest) -> Dict[str, Any]:
     writer_provider = values.get("writer_provider", "ollama")
     writer_model = values.get("writer_model")
     writer_llm = _get_chat_model(writer_provider, role="refine", model_override=writer_model)
+    persona = values.get("persona") or DEFAULT_PERSONA
+    persona_config = PERSONAS.get(persona) or PERSONAS[DEFAULT_PERSONA]
+    fmt = values.get("format") or DEFAULT_FORMAT
+    fconfig = FORMATS.get(fmt) or FORMATS[DEFAULT_FORMAT]
+    rules_block = style_profile.active_rules_block(persona)
 
-    prompt = f"""You are a senior CTO and Ph.D. refining a LinkedIn draft. Apply the following instruction to the draft below. Return ONLY the revised draft text — no explanations, no markdown, no commentary.
-
+    format_hint = f" The draft is in the following format: {fconfig['intro']}" if fmt != "post" else ""
+    prompt = f"""You are refining a LinkedIn draft. {persona_config['intro']}{format_hint} Apply the following instruction to the draft below, keeping the voice consistent with that persona. Return ONLY the revised draft text — no explanations, no markdown, no commentary.
+{f'{chr(10)}{rules_block}{chr(10)}' if rules_block else ''}
 Instruction: {payload.instruction}
 
 Current draft:
 {payload.current_draft}"""
 
-    refined = str(writer_llm.invoke(prompt).content)
+    response = writer_llm.invoke(prompt)
+    refined = str(response.content)
+    input_tokens, output_tokens, estimated = _capture_usage(response, prompt, refined)
+    cost_tracker.log_usage(
+        payload.thread_id, "refine", writer_provider, _resolve_model_name(writer_llm, writer_model),
+        input_tokens, output_tokens, estimated,
+    )
+    draft_store.add_version(payload.thread_id, refined, f"refine: {payload.instruction}")
+    active_rules = style_profile.get_active_rules(persona)
+    if active_rules:
+        style_profile.increment_applied([r["id"] for r in active_rules])
     return {"ok": True, "refined_draft": refined}
+
+
+@web_app.get("/api/style-rules")
+def list_style_rules(include_disabled: bool = False) -> Dict[str, Any]:
+    return {"ok": True, "rules": style_profile.list_rules(include_disabled=include_disabled)}
+
+
+@web_app.post("/api/style-rules")
+def create_style_rule(payload: StyleRuleRequest) -> Dict[str, Any]:
+    try:
+        rule = style_profile.add_rule(payload.rule_text, persona=payload.persona, source=payload.source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "rule": rule}
+
+
+@web_app.patch("/api/style-rules/{rule_id}")
+def update_style_rule(rule_id: int, payload: StyleRuleUpdateRequest) -> Dict[str, Any]:
+    try:
+        rule = style_profile.update_rule(rule_id, rule_text=payload.rule_text, persona=payload.persona)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if rule is None:
+        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+    return {"ok": True, "rule": rule}
+
+
+@web_app.post("/api/style-rules/{rule_id}/toggle")
+def toggle_style_rule(rule_id: int) -> Dict[str, Any]:
+    rule = style_profile.get_rule(rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+    style_profile.set_disabled(rule_id, not rule["disabled"])
+    return {"ok": True, "rule": style_profile.get_rule(rule_id)}
+
+
+@web_app.delete("/api/style-rules/{rule_id}")
+def delete_style_rule(rule_id: int) -> Dict[str, Any]:
+    if not style_profile.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+    return {"ok": True}
 
 
 @web_app.get("/api/scheduled-runs")
@@ -1770,6 +2267,64 @@ def skip_scheduled_run(run_id: str) -> str:
 @web_app.get("/api/scheduler/status")
 def scheduler_status() -> Dict[str, Any]:
     return {"ok": True, "running": scheduler.is_running()}
+
+
+@web_app.post("/api/webhook/trigger")
+def webhook_trigger(
+    payload: WebhookStartRequest,
+    x_webhook_secret: str = Header(default=""),
+) -> Dict[str, Any]:
+    configured_secret = (os.getenv("WEBHOOK_SECRET") or "").strip()
+    if not configured_secret:
+        raise HTTPException(
+            status_code=501,
+            detail="Webhook trigger is disabled. Set WEBHOOK_SECRET to enable /api/webhook/trigger.",
+        )
+    if not x_webhook_secret or not secrets.compare_digest(x_webhook_secret, configured_secret):
+        raise HTTPException(status_code=403, detail="Invalid or missing X-Webhook-Secret header.")
+
+    topic = payload.topic or os.getenv("WEBHOOK_TOPIC") or get_default_topic()
+    include_domains = payload.include_domains or (domain_store.get_enabled_domains() or None)
+    analyst_provider = payload.analyst_provider or os.getenv("WEBHOOK_ANALYST_PROVIDER", "ollama")
+    writer_provider = payload.writer_provider or os.getenv("WEBHOOK_WRITER_PROVIDER", "ollama")
+    analyst_model = payload.analyst_model or (os.getenv("WEBHOOK_ANALYST_MODEL") or None)
+    writer_model = payload.writer_model or (os.getenv("WEBHOOK_WRITER_MODEL") or None)
+    persona = payload.persona or DEFAULT_PERSONA
+    fmt = payload.format or "post"
+
+    now = datetime.now(timezone.utc)
+    run_id = f"webhook-{now.strftime('%Y-%m-%d-%H%M%S')}"
+
+    try:
+        candidates = scheduler.run_scout_analyst_job(
+            topic, include_domains, analyst_provider, writer_provider,
+            analyst_model, writer_model, persona, run_id, fmt,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "thread_id": run_id,
+        "candidate_count": len(candidates),
+    }
+
+
+@web_app.get("/api/costs/summary")
+def costs_summary(hours: int = 24) -> Dict[str, Any]:
+    return {"ok": True, **cost_tracker.get_recent_totals(hours)}
+
+
+@web_app.get("/api/costs/{thread_id}")
+def costs_for_thread(thread_id: str) -> Dict[str, Any]:
+    return {"ok": True, **cost_tracker.get_thread_cost(thread_id)}
+
+
+@web_app.get("/api/dashboard")
+def get_dashboard(days: int = 30) -> Dict[str, Any]:
+    days = max(1, min(days, 365))
+    return {"ok": True, **dashboard.build_dashboard(days=days)}
 
 
 @web_app.get("/api/domains")

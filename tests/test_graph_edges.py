@@ -111,7 +111,7 @@ class TopicAndPromptTests(unittest.TestCase):
                     "url": "https://example.com/ai",
                     "source": "example.com",
                     "published_at": "2026-06-01T00:00:00+00:00",
-                    "summary": "Useful context",
+                    "summary": "Useful context that is long enough to comfortably survive the pre-LLM heuristic filter's thin-summary check, well past the 150 character minimum threshold required to pass.",
                     "relevance_score": 0.0,
                 }
             ],
@@ -125,6 +125,78 @@ class TopicAndPromptTests(unittest.TestCase):
             graph.analyst_node(state)
 
         self.assertIn("published in the last 30 days", captured["prompt"])
+
+
+class HeuristicPrefilterTests(unittest.TestCase):
+    GOOD_SUMMARY = (
+        "A survey of 200 production agent deployments reveals 5 common failure "
+        "modes including state corruption and unbounded retry loops in agentic systems. "
+        "The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%."
+    )
+
+    def test_keeps_articles_with_substantial_summaries_and_neutral_titles(self):
+        articles = [{"id": "1", "title": "Why Agentic Workflows Break in Production", "summary": self.GOOD_SUMMARY}]
+
+        kept, stats = graph._heuristic_prefilter(articles)
+
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(stats["kept_count"], 1)
+        self.assertEqual(stats["dropped_thin_summary"], 0)
+        self.assertEqual(stats["dropped_press_release_pattern"], 0)
+
+    def test_drops_thin_summary(self):
+        articles = [{"id": "1", "title": "Some Article", "summary": "Too short."}]
+
+        kept, stats = graph._heuristic_prefilter(articles)
+
+        self.assertEqual(len(kept), 0)
+        self.assertEqual(stats["dropped_thin_summary"], 1)
+
+    def test_drops_funding_announcement_by_title(self):
+        articles = [{"id": "1", "title": "Acme Corp Raises $50M Series B", "summary": self.GOOD_SUMMARY}]
+
+        kept, stats = graph._heuristic_prefilter(articles)
+
+        self.assertEqual(len(kept), 0)
+        self.assertEqual(stats["dropped_press_release_pattern"], 1)
+
+    def test_drops_executive_appointment_press_release(self):
+        articles = [{"id": "1", "title": "Acme Corp Appoints Jane Doe as New CEO", "summary": self.GOOD_SUMMARY}]
+
+        kept, stats = graph._heuristic_prefilter(articles)
+
+        self.assertEqual(len(kept), 0)
+        self.assertEqual(stats["dropped_press_release_pattern"], 1)
+
+    def test_does_not_false_positive_on_technical_titles_mentioning_series(self):
+        articles = [{"id": "1", "title": "A New Series of Benchmarks for Agentic AI Systems", "summary": self.GOOD_SUMMARY}]
+
+        kept, stats = graph._heuristic_prefilter(articles)
+
+        self.assertEqual(len(kept), 1)
+
+
+class AuthorPersonaTests(unittest.TestCase):
+    ARTICLE = {
+        "id": "1",
+        "title": "Test Article",
+        "url": "https://example.com/a",
+        "source": "example.com",
+        "published_at": "2026-06-01T00:00:00+00:00",
+        "summary": "Useful context",
+        "relevance_score": 8.0,
+    }
+
+    def test_each_known_persona_produces_distinguishing_voice_text(self):
+        for persona_id, config in graph.PERSONAS.items():
+            prompt = graph._build_author_prompt(self.ARTICLE, None, persona_id)
+            self.assertIn(config["voice"], prompt)
+            self.assertIn(config["structure"], prompt)
+
+    def test_unrecognized_persona_falls_back_to_default(self):
+        prompt = graph._build_author_prompt(self.ARTICLE, None, "nonexistent_persona")
+        default_config = graph.PERSONAS[graph.DEFAULT_PERSONA]
+        self.assertIn(default_config["voice"], prompt)
 
 
 if __name__ == "__main__":

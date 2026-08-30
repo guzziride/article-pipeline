@@ -3,6 +3,8 @@
 > **Update (same day, post-review):** All P0 and P1 items are fixed and verified (see "P0/P1 Fix Log" at the end) — including a **new critical bug found during verification that isn't in the original findings**: `build_graph()`'s checkpointer connection was being closed by garbage collection before the graph ever ran, so every graph invocation failed outright.
 >
 > **Second update (same day):** the remaining P2/P3 *bugs* (Bug 4, Bug 5, Bug 7, Bug 9) are now also fixed and verified — see "P2/P3 Bug Fix Log" at the very end. The P2/P3 *feature* recommendations (draft version history, persona switching, hashtag library, toast notifications, export formats, cost/spend visibility, pre-LLM heuristic filtering, webhook triggers, LinkedIn API integration) remain open by scope — those are net-new work, not defect fixes, and weren't part of this pass.
+>
+> **Third update (same day):** all of the above is committed (`64810ce`, branch `fix/scheduler-cache-review`) and pushed to `origin`. `main` is untouched; nothing has been merged. `SESSION_CONTINUITY.md` and `processing-details.md` have been updated to reflect the current implementation and this audit/fix cycle.
 
 Follow-up audit to `AUDIT_REPORT.md` (v1). Since v1, a large amount of work landed on the `fix/scheduler-cache-review` branch (uncommitted, never merged to `main`): scout parallelization, `SqliteSaver` checkpointing, SSE token streaming, multi-axis analyst scoring, a factuality check, an inline refine toolbar, a candidate-card selection UI, RSS response caching, and a full scheduler + email digest subsystem. This report verifies what actually works, finds new bugs introduced by that work, and re-evaluates performance, cost, utility, and UX with fresh eyes.
 

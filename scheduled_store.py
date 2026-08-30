@@ -87,6 +87,25 @@ def list_runs(limit: int = 20) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def list_all_runs(limit: int = 500) -> List[Dict[str, Any]]:
+    """All runs for the dashboard, with candidate counts. Newest first."""
+    with _lock, _conn() as conn:
+        rows = conn.execute(
+            "SELECT run_id, thread_id, topic, triggered_at, email_sent_at, reviewed_at, candidates_json FROM scheduled_runs ORDER BY triggered_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        try:
+            cands = json.loads(d.pop("candidates_json", "[]"))
+            d["candidate_count"] = len(cands)
+        except json.JSONDecodeError:
+            d["candidate_count"] = 0
+        results.append(d)
+    return results
+
+
 def get_candidates(run_id: str) -> List[Dict[str, Any]]:
     with _lock, _conn() as conn:
         row = conn.execute("SELECT candidates_json FROM scheduled_runs WHERE run_id = ?", (run_id,)).fetchone()

@@ -8,6 +8,7 @@ os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 import feedparser
 
 import domain_store
+import draft_store
 import feed_cache
 import graph
 
@@ -91,6 +92,47 @@ class DomainStoreTests(unittest.TestCase):
 
         self.assertTrue(rows["a.com"])
         self.assertFalse(rows["b.com"])
+
+
+class DraftVersionTests(unittest.TestCase):
+    """Regression coverage for draft version history: refine/edit no longer
+    overwrite the draft in place with no way back — every distinct draft
+    state (author, refine, manual edit) is snapshotted and retrievable."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.original_db_path = draft_store.DB_PATH
+        draft_store.DB_PATH = os.path.join(self.tmp_dir, "test_drafts.db")
+        draft_store.init_db()
+
+    def tearDown(self):
+        draft_store.DB_PATH = self.original_db_path
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_versions_round_trip_in_order(self):
+        draft_store.add_version("thread-1", "draft v1", "author")
+        draft_store.add_version("thread-1", "draft v2", "refine: shorten")
+
+        versions = draft_store.get_versions("thread-1")
+
+        self.assertEqual(len(versions), 2)
+        self.assertEqual(versions[0]["draft"], "draft v1")
+        self.assertEqual(versions[0]["source"], "author")
+        self.assertEqual(versions[1]["draft"], "draft v2")
+        self.assertEqual(versions[1]["source"], "refine: shorten")
+
+    def test_versions_do_not_leak_across_threads(self):
+        draft_store.add_version("thread-1", "draft a", "author")
+        draft_store.add_version("thread-2", "draft b", "author")
+
+        self.assertEqual(len(draft_store.get_versions("thread-1")), 1)
+        self.assertEqual(len(draft_store.get_versions("thread-2")), 1)
+
+    def test_delete_all_for_thread_clears_versions(self):
+        draft_store.add_version("thread-1", "draft a", "author")
+        draft_store.delete_all_for_thread("thread-1")
+
+        self.assertEqual(draft_store.get_versions("thread-1"), [])
 
 
 class BuildGraphCheckpointerTests(unittest.TestCase):

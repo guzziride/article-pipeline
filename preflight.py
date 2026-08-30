@@ -74,7 +74,7 @@ def _check_env(analyst_provider: str, writer_provider: str) -> Tuple[List[str], 
     if not _present("OPENAI_MODEL"):
         warnings.append("OPENAI_MODEL not set; defaulting to gpt-4o")
     if not _present("GEMINI_MODEL"):
-        warnings.append("GEMINI_MODEL not set; defaulting to gemini-2.0-flash")
+        warnings.append("GEMINI_MODEL not set; defaulting to gemini-3.6-flash")
     if not _present("GROQ_MODEL"):
         warnings.append("GROQ_MODEL not set; defaulting to llama-3.1-8b-instant")
 

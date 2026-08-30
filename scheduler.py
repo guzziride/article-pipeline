@@ -33,6 +33,55 @@ def _get_graph_app():
         return _graph_app
 
 
+def run_scout_analyst_job(
+    topic: str,
+    include_domains: Optional[List[str]],
+    analyst_provider: str,
+    writer_provider: str,
+    analyst_model: Optional[str],
+    writer_model: Optional[str],
+    persona: str,
+    run_id: str,
+    fmt: str = "post",
+) -> List[Dict[str, Any]]:
+    """Runs scout+analyst to the approval interrupt, stores the run for review
+    in the Scheduled Runs panel, and emails a digest if there are candidates.
+    Shared by the cron scheduler and the webhook trigger so both unattended
+    entry points get the same review flow. Returns the curated candidates.
+    """
+    thread_id = run_id
+    app = _get_graph_app()
+    config = {"configurable": {"thread_id": thread_id}}
+
+    app.invoke(
+        {
+            "topic": topic,
+            "include_domains": include_domains,
+            "analyst_provider": analyst_provider,
+            "writer_provider": writer_provider,
+            "analyst_model": analyst_model,
+            "writer_model": writer_model,
+            "persona": persona,
+            "format": fmt,
+            "thread_id": thread_id,
+        },
+        config=config,
+    )
+
+    state = app.get_state(config)
+    values = state.values if isinstance(state.values, dict) else {}
+    candidates = values.get("curated_candidates", [])
+
+    scheduled_store.store_run(run_id, thread_id, topic, candidates)
+
+    if candidates:
+        sent = emailer.send_digest(candidates, run_id, topic)
+        if sent:
+            scheduled_store.mark_email_sent(run_id)
+
+    return candidates
+
+
 def _run_scheduled_job() -> None:
     topic = _env("SCHEDULER_TOPIC", get_default_topic())
     stored_domains = domain_store.get_enabled_domains()
@@ -45,40 +94,19 @@ def _run_scheduled_job() -> None:
     writer_provider = _env("SCHEDULER_WRITER_PROVIDER", "ollama")
     analyst_model = _env("SCHEDULER_ANALYST_MODEL") or None
     writer_model = _env("SCHEDULER_WRITER_MODEL") or None
+    persona = _env("SCHEDULER_PERSONA", "cto_phd")
+    fmt = _env("SCHEDULER_FORMAT", "post")
 
     now = datetime.now(timezone.utc)
     run_id = f"scheduled-{now.strftime('%Y-%m-%d-%H%M')}"
-    thread_id = run_id
-
-    app = _get_graph_app()
-    config = {"configurable": {"thread_id": thread_id}}
 
     try:
-        result = app.invoke(
-            {
-                "topic": topic,
-                "include_domains": include_domains,
-                "analyst_provider": analyst_provider,
-                "writer_provider": writer_provider,
-                "analyst_model": analyst_model,
-                "writer_model": writer_model,
-                "thread_id": thread_id,
-            },
-            config=config,
+        run_scout_analyst_job(
+            topic, include_domains, analyst_provider, writer_provider,
+            analyst_model, writer_model, persona, run_id, fmt,
         )
     except Exception:
         return
-
-    state = app.get_state(config)
-    values = state.values if isinstance(state.values, dict) else {}
-    candidates = values.get("curated_candidates", [])
-
-    scheduled_store.store_run(run_id, thread_id, topic, candidates)
-
-    if candidates:
-        sent = emailer.send_digest(candidates, run_id, topic)
-        if sent:
-            scheduled_store.mark_email_sent(run_id)
 
 
 def start_scheduler() -> None:

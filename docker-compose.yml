@@ -8,4 +8,10 @@ services:
       - .env
     volumes:
       - ./drafts.db:/app/drafts.db
+      - ./cache.db:/app/cache.db
+      - ./checkpoints.db:/app/checkpoints.db
+      - ./domains.db:/app/domains.db
+      - ./scheduled_runs.db:/app/scheduled_runs.db
+      - ./costs.db:/app/costs.db
+      - ./style_profile.db:/app/style_profile.db
     restart: always

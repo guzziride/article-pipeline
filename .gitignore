@@ -19,5 +19,11 @@ scheduled_runs.db-wal
 domains.db
 domains.db-shm
 domains.db-wal
+costs.db
+costs.db-shm
+costs.db-wal
+style_profile.db
+style_profile.db-shm
+style_profile.db-wal
 article Working Space.txt
 static/favicon.ico

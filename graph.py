@@ -24,6 +24,9 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 import progress as progress_tracker
 import feed_cache
+import cost_tracker
+import draft_store
+import style_profile
 from settings import (
     get_allow_undated_articles,
     get_default_topic,
@@ -73,6 +76,149 @@ ANALYST_MAX_PICKS = 20
 ANALYST_SUMMARY_MAX_CHARS = 260
 AUTHOR_SUMMARY_MAX_CHARS = 1600
 DRAFT_REVIEW_ACTIONS = {"publish", "edit", "pick_another", "done"}
+DEFAULT_PERSONA = "cto_phd"
+
+FORMATS: Dict[str, Dict[str, str]] = {
+    "post": {
+        "label": "Single Post",
+        "intro": "Write a single LinkedIn post.",
+        # structure/example/constraints left empty -> falls back to the persona's
+        # own structure/example (preserves byte-identical output for the default format).
+        "structure": "",
+        "example": "",
+        "constraints": "- Under 220 words. No emojis. Max 3 hashtags. No em dashes.",
+    },
+    "thread": {
+        "label": "Thread (5-7 posts)",
+        "intro": "Write a LinkedIn thread — a numbered sequence of 5 to 7 short posts. Each post must stand alone but connect into a single argument.",
+        "structure": """1. Post 1 (Hook) — A blunt, provocative statement or hard-learned lesson. No greeting, no preamble. Must make a reader want post 2.
+2. Posts 2-5 (Body) — One idea per post. Each post is a single argument, insight, or piece of evidence. Number them (2/, 3/, 4/, 5/).
+3. Post 6-7 (Close + CTA) — The takeaway and a provocative question that invites debate. End the thread with a clear CTA post.
+Each post: max 280 characters. Plain text, no emojis, no em dashes. Use line breaks between posts.""",
+        "example": """1/ The promise of agentic workflows is that they automate complex reasoning. The reality is most production deployments are one state corruption bug away from a 3 AM incident.
+
+2/ A study of 200 production agent deployments found 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents.
+
+3/ This isn't a maturity problem. It's an architecture problem. Checkpoint-and-replay isn't optional, it's table stakes.
+
+4/ Tool call budgets matter more than model quality. A 3-call limit with good error handling beats unlimited calls with a better model.
+
+5/ The proposed checkpoint pattern cut incidents by 60%. The catch: 15-20% latency per call. Worth it for anything customer-facing.
+
+6/ Are we over-indexing on model benchmarks and under-investing in the operational primitives that actually keep agents running?""",
+        "constraints": "- 5-7 numbered posts. Each post max 280 characters. No emojis. No em dashes. No hashtags except optionally one in the final post. Number each post (1/, 2/, 3/...).",
+    },
+    "carousel": {
+        "label": "Carousel (6-8 slides)",
+        "intro": "Write the text for a LinkedIn carousel — a 6 to 8 slide deck. Each slide is a title plus 1-3 short lines, designed to be read as a sequence.",
+        "structure": """1. Slide 1 (Cover) — A bold title that stops the scroll. 1 line, no subtitle needed.
+2. Slides 2-3 (Context) — The problem or tension. One idea per slide, 1-3 lines each.
+3. Slides 4-6 (Insights) — The tactical points. One per slide, 1-3 lines, scannable.
+4. Slide 7-8 (Close + CTA) — The takeaway slide and a final CTA slide with a question.
+Format each slide as: [Slide N] Title / line 1 / line 2. Keep every line short enough to fit on a slide (max ~60 chars).""",
+        "example": """[Slide 1] Why your agents keep breaking at 3 AM
+
+[Slide 2] The promise: autonomous reasoning chains
+The reality: one failed tool call from a page
+
+[Slide 3] 200 production deployments studied
+73% of incidents from just 2 failure modes
+
+[Slide 4] State corruption during retries
+You can't resume what you didn't checkpoint
+
+[Slide 5] Unbounded tool-calling loops
+One bad prompt = ten minutes of API spend
+
+[Slide 6] Fix: checkpoint before every call
+Cap tool calls per task. Log the reasoning graph.
+
+[Slide 7] 60% fewer incidents. 15% more latency.
+Worth it for anything customer-facing.
+
+[Slide 8] What's the most over-engineered agent thing you built before the simple version was enough?""",
+        "constraints": "- 6-8 slides. Each slide: a title + 1-3 lines. Each line max ~60 chars. No emojis. No em dashes. Format as [Slide N] Title / lines.",
+    },
+}
+
+DEFAULT_FORMAT = "post"
+
+PERSONAS: Dict[str, Dict[str, str]] = {
+    "cto_phd": {
+        "label": "CTO / PhD (Technical Authority)",
+        "intro": "You are a senior CTO and Ph.D. — a builder who has spent years in the trenches of distributed systems, agentic AI, and production infrastructure.",
+        "voice": """- Authoritative, blunt, intellectually honest. No corporate jargon (leverage, synergy, transformative, game-changer, paradigm shift).
+- Dry, cynical humor rooted in technical frustration — understatements, not jokes. "This is a fantastic way to spend a weekend debugging race conditions."
+- Skeptical optimism: acknowledge the innovation, then immediately surface the hidden cost or operational bottleneck.
+- Short, punchy sentences. Start in the middle of the argument — no filler intros like "I'm excited" or "In today's AI landscape."
+- If the article claims something is "easy" or "seamless," mock that claim with a dry observation about the inevitable edge cases.""",
+        "structure": """1. Hook — A contrarian statement, blunt observation, or hard-learned lesson. Never a greeting or preamble.
+2. Tension — Why this matters for builders, not spectators. The hidden difficulty or unspoken implication.
+3. 3 Tactical Insights — Bullet points. What this means for implementation, architecture, or engineering strategy.
+4. Closing — A provocative, opinionated question that invites debate from technical peers.""",
+        "example": """The promise of agentic workflows is that they'll automate complex reasoning chains. The reality is that most production deployments are one state corruption bug away from a 3 AM incident.
+
+What the paper actually found: 200 production agent deployments, 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents. This isn't a maturity problem. It's an architecture problem.
+
+What this means if you're building:
+• Checkpoint-and-replay isn't optional — it's table stakes. If your agent can't resume from a known good state after a tool call fails, you're shipping a time bomb.
+• Tool call budgets matter more than model quality. A 3-tool-call limit with good error handling beats unlimited calls with a better model.
+• Observability for agents is fundamentally different from observability for services. You need to trace the reasoning graph, not just the request graph.
+
+The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%. The catch? It adds 15-20% latency per tool call. Worth it for anything customer-facing. Probably overkill for internal dashboards.
+
+Are we over-indexing on model benchmarks and under-investing in the operational primitives that actually keep agents running in production?""",
+    },
+    "startup_founder": {
+        "label": "Startup Founder (Scrappy/Growth)",
+        "intro": "You are a startup founder who has shipped products under brutal constraints — small team, no runway to waste, and a bias toward action over theory.",
+        "voice": """- Energetic, direct, growth-obsessed. Speaks from hard-won experience building and shipping fast, not from a whiteboard.
+- Uses concrete numbers and outcomes over abstract theory — if something worked or failed, say by how much.
+- Optimistic but allergic to hype. Calls out shiny-object syndrome and "roadmap theater" bluntly.
+- Short, declarative sentences. No corporate speak, no "excited to announce."
+- Frames everything in terms of speed, leverage, and what it costs a small team to get right or wrong.""",
+        "structure": """1. Hook — a surprising outcome, a number, or a lesson learned the hard way.
+2. Why it matters for founders and operators, not just engineers — the business consequence.
+3. 3 Tactical Takeaways — what to actually do about it, sized for a small team.
+4. Closing — an invitation to share what worked or didn't for others in the same boat.""",
+        "example": """We burned two weeks building an "agentic" feature before realizing the model just needed a better prompt and a retry loop.
+
+Here's what the article gets right: most teams don't need a fleet of autonomous agents. They need one reliable model call with good error handling. The 200-deployment study behind this backs it up — the failure modes aren't exotic, they're the same state-management bugs every backend engineer already knows how to fix.
+
+What this means if you're a small team:
+• Don't build orchestration infrastructure before you've proven the core loop works on one happy path.
+• Checkpoint-and-replay sounds fancy. It's just "don't lose the user's progress when a call fails." Build that first, always.
+• Every tool call you add is a new way to burn your API budget silently. Cap it before you ship, not after the invoice.
+
+We shipped the boring version. It converts better than the "agentic" one ever did.
+
+What's the most over-engineered thing you built before realizing the simple version was enough?""",
+    },
+    "practitioner_engineer": {
+        "label": "Practitioner Engineer (Hands-On)",
+        "intro": "You are a hands-on software engineer sharing what you personally tried, what broke, and what you'd do differently — grounded, first-person, and not claiming to have all the answers.",
+        "voice": """- First-person, grounded, "I tried this so you don't have to" tone.
+- Focuses on what actually broke, what the docs don't tell you, and concrete fixes you found.
+- Modest, not authoritative — shares uncertainty where it exists, avoids sweeping claims.
+- Plain language, minimal jargon. Explains acronyms in passing rather than assuming familiarity.""",
+        "structure": """1. Hook — what you were trying to do and what went wrong.
+2. What you learned that wasn't obvious going in.
+3. 3 Practical Notes — things to check or do differently next time, phrased as concrete steps.
+4. Closing — an open question for others who've hit the same wall.""",
+        "example": """I spent a weekend trying to make an agent reliably retry after a failed tool call. It kept losing track of what it had already done.
+
+Turns out this is a known failure mode, not just something I did wrong. A study of 200 production agent deployments found the same two issues over and over: state corruption during retries, and tool-calling loops that never terminate. Knowing it's common didn't fix my bug, but it did tell me where to look.
+
+A few things that helped:
+• Save a checkpoint before every tool call, not after. If the call fails, you resume from a known point instead of guessing what already happened.
+• Put a hard cap on tool calls per task. I didn't have one, and a bad prompt sent it into a loop that ran for ten minutes before I noticed.
+• Log the reasoning steps, not just the final output. I couldn't debug the state corruption until I could actually see the sequence of decisions.
+
+None of this is exotic. It's the same discipline you'd apply to any retryable job — I just hadn't thought to apply it here yet.
+
+Has anyone found a cleaner way to bound tool-calling loops without hardcoding a call limit?""",
+    },
+}
 
 
 class Article(TypedDict):
@@ -111,6 +257,8 @@ class AgentState(TypedDict, total=False):
     writer_provider: Literal["openai", "gemini", "ollama", "groq"]
     analyst_model: str
     writer_model: str
+    persona: str
+    format: str
 
     # Runtime tracking
     thread_id: str
@@ -161,6 +309,19 @@ def _extract_json_payload(text: str) -> Dict[str, Any]:
         raise
 
 
+def _resolve_model_name(llm: Any, model_override: Optional[str]) -> str:
+    return str(getattr(llm, "model_name", None) or getattr(llm, "model", None) or model_override or "unknown")
+
+
+def _capture_usage(response: Any, prompt: str, output_text: str) -> tuple:
+    usage = getattr(response, "usage_metadata", None) or {}
+    input_tokens = usage.get("input_tokens") or 0
+    output_tokens = usage.get("output_tokens") or 0
+    if input_tokens > 0 or output_tokens > 0:
+        return int(input_tokens), int(output_tokens), False
+    return max(1, len(prompt) // 4), max(1, len(output_text) // 4), True
+
+
 def _invoke_analyst_structured(analyst_llm: Any, prompt: str) -> AnalystResponse:
     try:
         structured_llm = analyst_llm.with_structured_output(AnalystResponse)
@@ -170,7 +331,8 @@ def _invoke_analyst_structured(analyst_llm: Any, prompt: str) -> AnalystResponse
             [
                 prompt,
                 "Return valid JSON only with this exact shape:",
-                '{"picks": [{"id": "<id>", "relevance_score": 0.0}]}',
+                '{"picks": [{"id": "<id>", "relevance_score": 0.0, "contrarian_value": 0.0, '
+                '"technical_depth": 0.0, "debate_potential": 0.0, "timeliness": 0.0, "source_credibility": 0.0}]}',
                 "Do not include markdown or extra keys.",
             ]
         )
@@ -186,7 +348,7 @@ def _get_chat_model(provider: str, role: str, model_override: Optional[str] = No
     max_retries = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
     if provider == "gemini":
-        model = chosen_model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        model = chosen_model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         return ChatGoogleGenerativeAI(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "openai":
@@ -386,6 +548,47 @@ def _prepare_articles_for_analyst(articles: List[Article], max_items: int = ANAL
             }
         )
     return selected
+
+
+PREFILTER_MIN_SUMMARY_CHARS = 40
+_PREFILTER_TITLE_PATTERNS = [
+    re.compile(r"\braises?\s+\$", re.IGNORECASE),
+    re.compile(r"\bseries\s+[a-e]\b", re.IGNORECASE),
+    re.compile(r"\bfunding\s+round\b", re.IGNORECASE),
+    re.compile(r"\b(closes?|secures?)\s+\$", re.IGNORECASE),
+    re.compile(r"\bannounces?\s+(a\s+)?(strategic\s+)?partnership\b", re.IGNORECASE),
+    re.compile(r"\bappoints?\b.{0,20}\b(ceo|cfo|coo|cto|president|chairman)\b", re.IGNORECASE),
+]
+
+
+def _heuristic_prefilter(articles: List[Article]) -> tuple[List[Article], Dict[str, int]]:
+    """Cheap, high-precision pre-LLM filter for the AUTO-REJECT categories the
+    analyst prompt already scores 0-2 (press releases, funding announcements,
+    thin/paywalled summaries) — shrinks the candidate set before the analyst
+    LLM call instead of paying to have the model reject them itself. Kept
+    deliberately conservative (title-pattern + summary-length only) since a
+    false positive here silently drops a candidate the LLM never sees.
+    """
+    kept: List[Article] = []
+    dropped_thin_summary = 0
+    dropped_press_release = 0
+    for article in articles:
+        summary = (article.get("summary", "") or "").strip()
+        title = article.get("title", "") or ""
+        if len(summary) < PREFILTER_MIN_SUMMARY_CHARS:
+            dropped_thin_summary += 1
+            continue
+        if any(pattern.search(title) for pattern in _PREFILTER_TITLE_PATTERNS):
+            dropped_press_release += 1
+            continue
+        kept.append(article)
+    stats = {
+        "input_count": len(articles),
+        "kept_count": len(kept),
+        "dropped_thin_summary": dropped_thin_summary,
+        "dropped_press_release_pattern": dropped_press_release,
+    }
+    return kept, stats
 
 
 def _extract_domain(url: str) -> str:
@@ -864,13 +1067,15 @@ def analyst_node(state: AgentState) -> AgentState:
     if not articles:
         return {"curated_candidates": [], "workflow_status": "no_recent_articles"}
 
-    prepared_articles = _prepare_articles_for_analyst(articles)
+    filtered_articles, prefilter_stats = _heuristic_prefilter(articles)
+    prepared_articles = _prepare_articles_for_analyst(filtered_articles)
+    scout_debug = {**(state.get("scout_debug") or {}), "analyst_prefilter": prefilter_stats}
 
     if tid:
         progress_tracker.set_phase(tid, "analyst", 90, f"Running analyst LLM on {len(prepared_articles)} articles...")
 
     if not prepared_articles:
-        return {"curated_candidates": [], "workflow_status": "no_recent_articles"}
+        return {"curated_candidates": [], "workflow_status": "no_recent_articles", "scout_debug": scout_debug}
 
     provider = state.get("analyst_provider", "ollama")
     analyst_model = state.get("analyst_model")
@@ -926,6 +1131,14 @@ def analyst_node(state: AgentState) -> AgentState:
     )
 
     response = _invoke_analyst_structured(analyst_llm, prompt)
+
+    input_tokens = max(1, len(prompt) // 4)
+    output_tokens = max(1, len(str(response.picks)) // 4)
+    cost_tracker.log_usage(
+        tid, "analyst", provider, _resolve_model_name(analyst_llm, analyst_model),
+        input_tokens, output_tokens, estimated=True,
+    )
+
     id_to_article = {item.get("id", ""): item for item in prepared_articles}
 
     curated: List[Article] = []
@@ -950,6 +1163,7 @@ def analyst_node(state: AgentState) -> AgentState:
     return {
         "curated_candidates": curated[:ANALYST_MAX_PICKS],
         "workflow_status": "awaiting_approval" if articles else "no_recent_articles",
+        "scout_debug": scout_debug,
     }
 
 
@@ -1006,7 +1220,14 @@ def approval_node(state: AgentState) -> AgentState:
     }
 
 
-def _verify_factuality(draft: str, article: Article, llm: Any) -> str:
+def _verify_factuality(
+    draft: str,
+    article: Article,
+    llm: Any,
+    thread_id: str = "",
+    provider: str = "",
+    model: str = "",
+) -> str:
     if not draft or not article:
         return ""
     summary = (article.get("summary", "") or "")[:AUTHOR_SUMMARY_MAX_CHARS]
@@ -1021,9 +1242,42 @@ Draft:
 {draft}"""
     try:
         response = llm.invoke(prompt)
-        return str(response.content).strip()
+        result = str(response.content).strip()
+        input_tokens, output_tokens, estimated = _capture_usage(response, prompt, result)
+        cost_tracker.log_usage(thread_id, "factuality", provider, model, input_tokens, output_tokens, estimated)
+        return result
     except Exception:
         return ""
+
+
+def _build_author_prompt(article: Article, feedback: Optional[str], persona: str, style_rules_block: Optional[str] = None, fmt: str = "post") -> str:
+    pconfig = PERSONAS.get(persona) or PERSONAS[DEFAULT_PERSONA]
+    fconfig = FORMATS.get(fmt) or FORMATS[DEFAULT_FORMAT]
+    # post format: structure/example fall back to the persona's (byte-identical legacy output).
+    structure = fconfig["structure"] or pconfig["structure"]
+    example = fconfig["example"] or pconfig["example"]
+    constraints = fconfig["constraints"]
+    rules_section = f"\n{style_rules_block}\n" if style_rules_block else ""
+    return f"""Write a LinkedIn post about the article below. {pconfig['intro']} {fconfig['intro']}
+
+VOICE:
+{pconfig['voice']}
+
+STRUCTURE:
+{structure}
+
+CONSTRAINTS:
+{constraints}
+{rules_section}
+EXAMPLE OUTPUT:
+{example}
+
+Article title: {article.get('title', '')}
+Article url: {article.get('url', '')}
+Article published_at: {article.get('published_at', '')}
+Article summary: {(article.get('summary', '') or '')[:AUTHOR_SUMMARY_MAX_CHARS]}
+Analyst relevance score: {article.get('relevance_score', 0.0)}
+Human feedback: {feedback or 'None'}"""
 
 
 def author_node(state: AgentState) -> AgentState:
@@ -1051,51 +1305,20 @@ def author_node(state: AgentState) -> AgentState:
     writer_model = state.get("writer_model")
     writer_llm = _get_chat_model(provider, role="writer", model_override=writer_model)
     feedback = state.get("human_feedback")
+    persona = state.get("persona") or DEFAULT_PERSONA
+    fmt = state.get("format") or DEFAULT_FORMAT
 
-    prompt = f"""Write a LinkedIn post about the article below. You are a senior CTO and Ph.D. — a builder who has spent years in the trenches of distributed systems, agentic AI, and production infrastructure.
+    active_rules = style_profile.get_active_rules(persona)
+    rules_block = style_profile.active_rules_block(persona)
 
-VOICE:
-- Authoritative, blunt, intellectually honest. No corporate jargon (leverage, synergy, transformative, game-changer, paradigm shift).
-- Dry, cynical humor rooted in technical frustration — understatements, not jokes. "This is a fantastic way to spend a weekend debugging race conditions."
-- Skeptical optimism: acknowledge the innovation, then immediately surface the hidden cost or operational bottleneck.
-- Short, punchy sentences. Start in the middle of the argument — no filler intros like "I'm excited" or "In today's AI landscape."
-- If the article claims something is "easy" or "seamless," mock that claim with a dry observation about the inevitable edge cases.
-
-STRUCTURE:
-1. Hook — A contrarian statement, blunt observation, or hard-learned lesson. Never a greeting or preamble.
-2. Tension — Why this matters for builders, not spectators. The hidden difficulty or unspoken implication.
-3. 3 Tactical Insights — Bullet points. What this means for implementation, architecture, or engineering strategy.
-4. Closing — A provocative, opinionated question that invites debate from technical peers.
-
-CONSTRAINTS:
-- Under 220 words. No emojis. Max 3 hashtags. No em dashes.
-
-EXAMPLE OUTPUT:
-The promise of agentic workflows is that they'll automate complex reasoning chains. The reality is that most production deployments are one state corruption bug away from a 3 AM incident.
-
-What the paper actually found: 200 production agent deployments, 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents. This isn't a maturity problem. It's an architecture problem.
-
-What this means if you're building:
-• Checkpoint-and-replay isn't optional — it's table stakes. If your agent can't resume from a known good state after a tool call fails, you're shipping a time bomb.
-• Tool call budgets matter more than model quality. A 3-tool-call limit with good error handling beats unlimited calls with a better model.
-• Observability for agents is fundamentally different from observability for services. You need to trace the reasoning graph, not just the request graph.
-
-The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%. The catch? It adds 15-20% latency per tool call. Worth it for anything customer-facing. Probably overkill for internal dashboards.
-
-Are we over-indexing on model benchmarks and under-investing in the operational primitives that actually keep agents running in production?
-
-Article title: {article.get('title', '')}
-Article url: {article.get('url', '')}
-Article published_at: {article.get('published_at', '')}
-Article summary: {(article.get('summary', '') or '')[:AUTHOR_SUMMARY_MAX_CHARS]}
-Analyst relevance score: {article.get('relevance_score', 0.0)}
-Human feedback: {feedback or 'None'}"""
+    prompt = _build_author_prompt(article, feedback, persona, rules_block, fmt)
 
     if tid:
         progress_tracker.clear_stream(tid)
         progress_tracker.set_phase(tid, "author", 95, "Generating LinkedIn draft...")
 
     full_draft = ""
+    merged_chunk = None
     try:
         for chunk in writer_llm.stream(prompt):
             token = str(getattr(chunk, "content", "") or "")
@@ -1103,15 +1326,26 @@ Human feedback: {feedback or 'None'}"""
                 full_draft += token
                 if tid:
                     progress_tracker.append_stream_token(tid, token)
+            merged_chunk = chunk if merged_chunk is None else merged_chunk + chunk
     except Exception:
-        full_draft = str(writer_llm.invoke(prompt).content)
+        response = writer_llm.invoke(prompt)
+        full_draft = str(response.content)
+        merged_chunk = response
 
     if tid:
         progress_tracker.mark_stream_done(tid)
         progress_tracker.set_phase(tid, "author", 100, "Draft generated")
 
+    writer_model_name = _resolve_model_name(writer_llm, writer_model)
+    input_tokens, output_tokens, estimated = _capture_usage(merged_chunk, prompt, full_draft)
+    cost_tracker.log_usage(tid, "author_draft", provider, writer_model_name, input_tokens, output_tokens, estimated)
+    if tid:
+        draft_store.add_version(tid, full_draft, "author")
+    if active_rules:
+        style_profile.increment_applied([r["id"] for r in active_rules])
+
     factuality_notes = (
-        _verify_factuality(full_draft, article, writer_llm)
+        _verify_factuality(full_draft, article, writer_llm, tid, provider, writer_model_name)
         if get_factuality_check_enabled()
         else ""
     )
