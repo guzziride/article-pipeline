@@ -448,7 +448,8 @@ def index() -> str:
     <section class="card">
       <h2>1) Start Flow</h2>
       <div class="grid">
-        <div><label>Thread ID</label><input id="thread-id" value="web-demo-thread" /></div>
+        <div><label>Thread ID</label><input id="thread-id" list="thread-options" value="web-demo-thread" placeholder="Select a recent thread or type a new one" /></div>
+        <datalist id="thread-options"></datalist>
         <div><label>Analyst Provider</label>
           <select id="analyst-provider">
             <option value="gemini">gemini</option>
@@ -465,8 +466,8 @@ def index() -> str:
             <option value="ollama" selected>ollama</option>
           </select>
         </div>
-        <div><label>Analyst Model (optional override)</label><input id="analyst-model" list="ollama-models" placeholder="e.g. gemini-3.6-flash or llama3.1" /></div>
-        <div><label>Writer Model (optional override)</label><input id="writer-model" list="ollama-models" placeholder="e.g. gpt-4o or llama3.1" /></div>
+        <div><label>Analyst Model (optional override)</label><input id="analyst-model" list="ollama-models" placeholder="deepseek-v4-flash:cloud" /></div>
+        <div><label>Writer Model (optional override)</label><input id="writer-model" list="ollama-models" placeholder="deepseek-v4-flash:cloud" /></div>
         <div><label>Persona</label>
           <select id="persona-select">
             <option value="cto_phd" selected>CTO / PhD (Technical Authority)</option>
@@ -635,8 +636,10 @@ __OLLAMA_OPTIONS__
     </section>
 
     <section class="card">
-      <h2>Live State JSON</h2>
-      <pre id="state-json">{}</pre>
+      <details>
+        <summary style="cursor:pointer; font-weight:bold; font-size:18px;"><h2 style="display:inline; margin:0;">Live State JSON</h2></summary>
+        <pre id="state-json" style="margin-top:10px;">{}</pre>
+      </details>
     </section>
 
     <section class="card">
@@ -1841,6 +1844,17 @@ __OLLAMA_OPTIONS__
     hydrateDomainsFromServer();
     updateModelList("analyst-provider", "analyst-model");
     updateModelList("writer-provider", "writer-model");
+    // ---------- Recent Threads ----------
+    async function loadRecentThreads() {
+      const list = document.getElementById("thread-options");
+      try {
+        const res = await fetch("/api/threads");
+        const data = await res.json();
+        if (!res.ok || !data.threads) return;
+        list.innerHTML = data.threads.map((t) => `<option value="${String(t || "").replace(/</g, "&lt;")}">`).join("");
+      } catch (e) { /* non-fatal */ }
+    }
+    loadRecentThreads();
     // ---------- Performance Dashboard ----------
     async function loadDashboard() {
       const el = document.getElementById("dashboard-content");
@@ -2341,6 +2355,11 @@ def get_domains() -> Dict[str, Any]:
 def save_domains(payload: DomainsRequest) -> Dict[str, Any]:
     domain_store.save_domains(payload.domains, payload.disabled)
     return {"ok": True}
+
+
+@web_app.get("/api/threads")
+def get_threads() -> Dict[str, Any]:
+    return {"ok": True, "threads": cost_tracker.list_recent_threads(limit=10)}
 
 
 @web_app.on_event("startup")

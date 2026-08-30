@@ -5,6 +5,7 @@ import operator
 import ipaddress
 import socket
 import sqlite3
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -32,6 +33,10 @@ from settings import (
     get_default_topic,
     get_factuality_check_enabled,
     get_max_article_age_days,
+    get_paywall_markers,
+    get_paywalled_domains,
+    get_paywall_probe_enabled,
+    get_paywall_probe_max,
     get_rss_max_items_per_feed,
     get_scout_max_total_articles,
 )
@@ -360,7 +365,7 @@ def _get_chat_model(provider: str, role: str, model_override: Optional[str] = No
         return ChatGroq(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "ollama":
-        model = chosen_model or os.getenv("OLLAMA_MODEL", "llama3.1")
+        model = chosen_model or os.getenv("OLLAMA_MODEL", "deepseek-v4-flash:cloud")
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         headers = {}
         api_key = os.getenv("OLLAMA_API_KEY")
@@ -603,6 +608,60 @@ def _extract_domain(url: str) -> str:
     return host
 
 
+def _http_fetch_text(url: str, timeout: float = 8.0, max_bytes: int = 600_000) -> str:
+    """Fetch a web page as text. Raises on any error (caller decides fail-open)."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) ArticlePipelineBot/1.0",
+            "Accept": "text/html, application/xhtml+xml, */*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        charset = resp.headers.get_content_charset() or "utf-8"
+        body = resp.read(max_bytes)
+        return body.decode(charset, errors="replace")
+
+
+# Substrings in HTML/title that indicate the page is behind a paywall or
+# requires a subscription. Matched case-insensitively against the fetched body.
+# Title substrings that, when short, indicate the page is a login/subscribe
+# wall rather than the article itself.
+_PAYWALL_TITLE_HINTS = ("subscribe", "sign in", "log in", "paywall", "members only")
+
+
+def _is_paywalled_article(url: str) -> tuple[bool, str]:
+    """Probe the article URL and decide if it is behind a paywall.
+
+    Returns (is_paywalled, reason). Fail-open: on any fetch error, returns
+    (False, "") so a transient network failure never silently drops an article.
+    """
+    if not _is_public_http_url(url):
+        return False, ""
+
+    try:
+        html = _http_fetch_text(url)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return True, f"http_{exc.code}"
+        return False, ""
+    except Exception:
+        return False, ""
+
+    lower = html.lower()
+    for marker in get_paywall_markers():
+        if marker in lower:
+            return True, f"marker:{marker}"
+
+    title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if title_match:
+        title_text = title_match.group(1).strip().lower()
+        if len(title_text) < 120 and any(hint in title_text for hint in _PAYWALL_TITLE_HINTS):
+            return True, f"title:{title_text[:40]}"
+
+    return False, ""
+
+
 def _is_public_http_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -711,6 +770,8 @@ def _normalize_rss_entries(
 
     max_age_days = get_max_article_age_days()
     allow_undated = get_allow_undated_articles()
+    paywalled_domains = get_paywalled_domains()
+    paywall_markers = get_paywall_markers()
     now = datetime.now(timezone.utc)
     cutoff = now.timestamp() - (max_age_days * 24 * 60 * 60)
 
@@ -718,6 +779,8 @@ def _normalize_rss_entries(
     dropped_old_date = 0
     dropped_no_title_url = 0
     dropped_topic_mismatch = 0
+    dropped_paywall_domain = 0
+    dropped_paywall_marker = 0
 
     next_id = start_id
     for entry in entries:
@@ -819,12 +882,59 @@ def _normalize_rss_entries(
             next_id += 1
             continue
 
+        url_domain = _extract_domain(url)
+        if paywalled_domains and url_domain in paywalled_domains:
+            dropped_paywall_domain += 1
+            drop_reason = "paywall_domain"
+            audit.append(
+                {
+                    "id": str(next_id),
+                    "title": title,
+                    "url": url,
+                    "url_domain": url_domain,
+                    "published_at": published_at_str,
+                    "published_at_source": published_source,
+                    "raw_date_fields": raw_date_fields,
+                    "kept": False,
+                    "drop_reason": drop_reason,
+                    "ingestion_mode": ingestion_mode,
+                    "feed_url": feed_url,
+                    "requested_domain": domain,
+                }
+            )
+            next_id += 1
+            continue
+
+        if paywall_markers:
+            combined = f"{title}\n{summary}".lower()
+            if any(marker in combined for marker in paywall_markers):
+                dropped_paywall_marker += 1
+                drop_reason = "paywall_marker"
+                audit.append(
+                    {
+                        "id": str(next_id),
+                        "title": title,
+                        "url": url,
+                        "url_domain": url_domain,
+                        "published_at": published_at_str,
+                        "published_at_source": published_source,
+                        "raw_date_fields": raw_date_fields,
+                        "kept": False,
+                        "drop_reason": drop_reason,
+                        "ingestion_mode": ingestion_mode,
+                        "feed_url": feed_url,
+                        "requested_domain": domain,
+                    }
+                )
+                next_id += 1
+                continue
+
         audit.append(
             {
                 "id": str(next_id),
                 "title": title,
                 "url": url,
-                "url_domain": _extract_domain(url),
+                "url_domain": url_domain,
                 "published_at": published_at_str,
                 "published_at_source": published_source,
                 "raw_date_fields": raw_date_fields,
@@ -860,6 +970,8 @@ def _normalize_rss_entries(
         "dropped_missing_date": dropped_missing_date,
         "dropped_old_date": dropped_old_date,
         "dropped_topic_mismatch": dropped_topic_mismatch,
+        "dropped_paywall_domain": dropped_paywall_domain,
+        "dropped_paywall_marker": dropped_paywall_marker,
     }
     return normalized, audit, stats
 
@@ -970,7 +1082,7 @@ def scout_node(state: AgentState) -> AgentState:
             if tid:
                 progress_tracker.record_source_result(
                     tid, domain, len(articles), stats.get("entries_count", 0), mode,
-                    drops={k: stats.get(k, 0) for k in ["dropped_no_title_url", "dropped_missing_date", "dropped_old_date", "dropped_topic_mismatch"]},
+                    drops={k: stats.get(k, 0) for k in ["dropped_no_title_url", "dropped_missing_date", "dropped_old_date", "dropped_topic_mismatch", "dropped_paywall_domain", "dropped_paywall_marker"]},
                 )
             return articles, audit, stats, [], len(audit)
         except Exception as exc:
@@ -1009,6 +1121,34 @@ def scout_node(state: AgentState) -> AgentState:
         return parsed.timestamp() if parsed else 0.0
 
     deduped_articles.sort(key=_article_sort_key, reverse=True)
+
+    # ---------- Paywall probe ----------
+    # Fetch each surviving article (up to a cap) and drop paywalled ones before
+    # the analyst is called. Fail-open: any fetch error keeps the article.
+    paywall_probed = 0
+    paywall_dropped: List[Dict[str, str]] = []
+    if get_paywall_probe_enabled() and deduped_articles:
+        probe_max = get_paywall_probe_max()
+        probe_targets = deduped_articles[:probe_max] if probe_max > 0 else []
+        if tid and probe_targets:
+            progress_tracker.set_phase(tid, "scout", 70, f"Probing {len(probe_targets)} articles for paywalls...")
+        paywalled_ids: set[str] = set()
+
+        def _probe(article: Article) -> None:
+            url = (article.get("url") or "").strip()
+            is_pw, reason = _is_paywalled_article(url)
+            if is_pw:
+                paywalled_ids.add(article.get("id", ""))
+
+        with ThreadPoolExecutor(max_workers=max(1, int(os.getenv("SCOUT_MAX_WORKERS", "6")))) as executor:
+            list(executor.map(_probe, probe_targets))
+        paywall_probed = len(probe_targets)
+        if paywalled_ids:
+            dropped = [a for a in deduped_articles if a.get("id") in paywalled_ids]
+            kept = [a for a in deduped_articles if a.get("id") not in paywalled_ids]
+            paywall_dropped = [{"title": a.get("title", ""), "url": a.get("url", ""), "reason": "paywalled"} for a in dropped]
+            deduped_articles = kept
+
     max_total_articles = get_scout_max_total_articles()
     if len(deduped_articles) > max_total_articles:
         deduped_articles = deduped_articles[:max_total_articles]
@@ -1040,6 +1180,12 @@ def scout_node(state: AgentState) -> AgentState:
             "max_total_articles": max_total_articles,
             "max_article_age_days": get_max_article_age_days(),
             "allow_undated_articles": get_allow_undated_articles(),
+            "paywall_blocked_domains": sorted(get_paywalled_domains()),
+            "paywall_markers": get_paywall_markers(),
+            "paywall_probe_enabled": get_paywall_probe_enabled(),
+            "paywall_probe_max": get_paywall_probe_max(),
+            "paywall_probed": paywall_probed,
+            "paywall_dropped": paywall_dropped,
             "sample_urls": [a.get("url", "") for a in deduped_articles[:3]],
             "url_audit": all_audit,
         },

@@ -131,6 +131,18 @@ def get_thread_cost(thread_id: str) -> Dict[str, Any]:
     }
 
 
+def list_recent_threads(limit: int = 10) -> List[str]:
+    """Most recently active thread IDs, most recent first, deduplicated."""
+    with _lock, _conn() as conn:
+        rows = conn.execute(
+            "SELECT thread_id, MAX(ts) AS last_ts FROM usage "
+            "WHERE thread_id IS NOT NULL AND thread_id != '' "
+            "GROUP BY thread_id ORDER BY last_ts DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [r["thread_id"] for r in rows]
+
+
 def get_recent_totals(hours: int = 24) -> Dict[str, Any]:
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     with _lock, _conn() as conn:

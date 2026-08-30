@@ -176,6 +176,95 @@ class HeuristicPrefilterTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
 
 
+class PaywallDomainAndMarkerTests(unittest.TestCase):
+    def _entry(self, title, link, summary, published="2026-08-29T00:00:00Z"):
+        class _E:
+            pass
+        e = _E()
+        e.title = title
+        e.link = link
+        e.summary = summary
+        e.published = published
+        e.published_parsed = None
+        e.updated_parsed = None
+        e.created_parsed = None
+        e.updated = None
+        e.created = None
+        e.dc_date = None
+        return e
+
+    def test_drops_paywall_domain(self):
+        feed = type("F", (), {"entries": [self._entry("Exclusive", "https://www.theinformation.com/a", "A long enough summary about the article content here.")]})
+        with patch.object(graph, "get_paywalled_domains", return_value={"theinformation.com"}), patch.object(graph, "get_paywall_markers", return_value=[]):
+            normalized, audit, stats = graph._normalize_rss_entries("theinformation.com", "http://feed", feed, 0)
+        self.assertEqual(len(normalized), 0)
+        self.assertEqual(stats["dropped_paywall_domain"], 1)
+        self.assertEqual(audit[0]["drop_reason"], "paywall_domain")
+
+    def test_drops_paywall_marker_in_summary(self):
+        feed = type("F", (), {"entries": [self._entry("Some post", "https://substack.example.com/x", "This post is for paid subscribers only. Here is the teaser.")]})
+        with patch.object(graph, "get_paywalled_domains", return_value=set()), patch.object(graph, "get_paywall_markers", return_value=["this post is for paid subscribers"]):
+            normalized, audit, stats = graph._normalize_rss_entries("substack.example.com", "http://feed", feed, 0)
+        self.assertEqual(len(normalized), 0)
+        self.assertEqual(stats["dropped_paywall_marker"], 1)
+        self.assertEqual(audit[0]["drop_reason"], "paywall_marker")
+
+    def test_keeps_free_substack_post(self):
+        feed = type("F", (), {"entries": [self._entry("How MCP works", "https://latent.space/x", "A detailed free post about Model Context Protocol internals and patterns.")]})
+        with patch.object(graph, "get_paywalled_domains", return_value=set()), patch.object(graph, "get_paywall_markers", return_value=["this post is for paid subscribers"]):
+            normalized, audit, stats = graph._normalize_rss_entries("latent.space", "http://feed", feed, 0)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(stats["dropped_paywall_marker"], 0)
+
+
+class PaywallProbeTests(unittest.TestCase):
+    def _fake_response(self, html: str, status: int = 200):
+        m = unittest.mock.MagicMock()
+        m.headers.get_content_charset.return_value = "utf-8"
+        m.read.return_value = html.encode("utf-8")
+        m.__enter__ = lambda s: m
+        m.__exit__ = lambda s, *a: False
+        m.status = status
+        return m
+
+    def test_is_paywalled_marker_in_body(self):
+        with patch.object(graph, "_is_public_http_url", return_value=True), patch.object(
+            graph.urllib.request, "urlopen", return_value=self._fake_response("This post is for paid subscribers only. <p>full article</p>")
+        ):
+            is_pw, reason = graph._is_paywalled_article("https://substack.example.com/x")
+        self.assertTrue(is_pw)
+        self.assertTrue(reason.startswith("marker:"))
+
+    def test_is_paywalled_http_403(self):
+        with patch.object(graph, "_is_public_http_url", return_value=True), patch.object(
+            graph.urllib.request, "urlopen", side_effect=graph.urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+        ):
+            is_pw, reason = graph._is_paywalled_article("https://wsj.example.com/x")
+        self.assertTrue(is_pw)
+        self.assertEqual(reason, "http_403")
+
+    def test_not_paywalled_free_article(self):
+        with patch.object(graph, "_is_public_http_url", return_value=True), patch.object(
+            graph.urllib.request, "urlopen", return_value=self._fake_response("<html><title>How Agentic AI Works</title><p>full article body</p></html>")
+        ):
+            is_pw, reason = graph._is_paywalled_article("https://openai.com/research/x")
+        self.assertFalse(is_pw)
+        self.assertEqual(reason, "")
+
+    def test_fetch_error_fails_open(self):
+        with patch.object(graph, "_is_public_http_url", return_value=True), patch.object(
+            graph.urllib.request, "urlopen", side_effect=Exception("network down")
+        ):
+            is_pw, reason = graph._is_paywalled_article("https://openai.com/research/x")
+        self.assertFalse(is_pw)
+        self.assertEqual(reason, "")
+
+    def test_non_public_url_skips_probe(self):
+        with patch.object(graph, "_is_public_http_url", return_value=False):
+            is_pw, reason = graph._is_paywalled_article("http://localhost/x")
+        self.assertFalse(is_pw)
+
+
 class AuthorPersonaTests(unittest.TestCase):
     ARTICLE = {
         "id": "1",
