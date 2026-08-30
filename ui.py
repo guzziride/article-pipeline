@@ -21,7 +21,7 @@ import scheduler
 import cost_tracker
 import style_profile
 import dashboard
-from graph import DEFAULT_PERSONA, DEFAULT_FORMAT, PERSONAS, FORMATS, _capture_usage, _get_chat_model, _resolve_model_name, build_graph
+from graph import DEFAULT_PERSONA, DEFAULT_FORMAT, PERSONAS, FORMATS, _ANTI_AI_TELLS, _capture_usage, _get_chat_model, _resolve_model_name, build_graph
 from settings import get_default_topic, get_ollama_model_options
 
 
@@ -64,6 +64,11 @@ class RefineRequest(BaseModel):
     thread_id: str = Field(...)
     instruction: str = Field(...)
     current_draft: str = Field(...)
+
+
+class LearnFromEditRequest(BaseModel):
+    thread_id: str = Field(...)
+    published_draft: str = Field(...)
 
 
 class ProviderHealthRequest(BaseModel):
@@ -594,6 +599,13 @@ __OLLAMA_OPTIONS__
           <button id="refine-technical" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">More Technical</button>
           <button id="refine-cta" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Stronger CTA</button>
           <button id="refine-grammar" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Fix Grammar</button>
+        </div>
+      </div>
+      <div style="margin-bottom:10px;">
+        <label>Custom feedback (type your own refine instruction)</label>
+        <div class="row" style="gap:6px; flex-wrap:wrap; margin-top:6px;">
+          <textarea id="custom-refine" placeholder="e.g. The second paragraph misses the point — the real story is about cost, not latency. Refocus on that." style="flex:1 1 300px; min-height:60px;"></textarea>
+          <button id="refine-custom" class="alt" style="flex:0 0 auto; padding:6px 12px; font-size:13px;">Refine with Feedback</button>
         </div>
       </div>
       <div style="margin-bottom:10px;">
@@ -1425,8 +1437,10 @@ __OLLAMA_OPTIONS__
     }
 
     async function approveDraft() {
+      const tid = threadIdEl.value.trim();
+      const editedDraft = draftEditorEl.value || "";
       const payload = {
-        thread_id: threadIdEl.value.trim(),
+        thread_id: tid,
         action: "publish",
       };
       const res = await fetch("/api/resume", {
@@ -1437,6 +1451,49 @@ __OLLAMA_OPTIONS__
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed to approve draft");
       applyState(data.state, data.history || []);
+
+      // Offer to learn from manual edits (D).
+      try {
+        const lr = await fetch("/api/learn-from-edit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ thread_id: tid, published_draft: editedDraft }),
+        });
+        const ld = await lr.json();
+        if (lr.ok && ld.changed && ld.proposed_rule) {
+          offerLearnFromEdit(ld.proposed_rule);
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
+    function offerLearnFromEdit(ruleText) {
+      const container = document.getElementById("toast-container");
+      const el = document.createElement("div");
+      el.className = "toast toast-info";
+      el.style.cursor = "default";
+      el.innerHTML = `<span>Learn from your edit?</span>
+        <button class="alt" style="width:auto; padding:3px 10px; font-size:12px; margin-left:10px;">Save rule</button>`;
+      const btn = el.querySelector("button");
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const persona = personaSelectEl.value || "*";
+        const r = await fetch("/api/style-rules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rule_text: ruleText, persona, source: "learned_from_edit" }),
+        });
+        const d = await r.json();
+        if (!r.ok) { toast(d.detail || "Failed to save rule", "error"); return; }
+        toast("Style rule saved from your edit.");
+        el.remove();
+        loadStyleRules();
+      });
+      container.appendChild(el);
+      requestAnimationFrame(() => el.classList.add("toast-visible"));
+      setTimeout(() => {
+        el.classList.remove("toast-visible");
+        setTimeout(() => el.remove(), 200);
+      }, 12000);
     }
 
     async function saveEditDraft() {
@@ -1678,6 +1735,11 @@ __OLLAMA_OPTIONS__
     document.getElementById("refine-technical").addEventListener("click", () => withBusyButton(document.getElementById("refine-technical"), "...", () => withUiErrors(() => refineDraft("Make this more technical. Add specific implementation details, architecture tradeoffs, or engineering considerations. Use precise technical terminology."))));
     document.getElementById("refine-cta").addEventListener("click", () => withBusyButton(document.getElementById("refine-cta"), "...", () => withUiErrors(() => refineDraft("Strengthen the closing. End with a provocative, opinionated question that invites debate from technical peers."))));
     document.getElementById("refine-grammar").addEventListener("click", () => withBusyButton(document.getElementById("refine-grammar"), "...", () => withUiErrors(() => refineDraft("Fix grammar, spelling, and punctuation. Improve sentence flow and readability without changing the content or tone."))));
+    document.getElementById("refine-custom").addEventListener("click", () => {
+      const instruction = document.getElementById("custom-refine").value.trim();
+      if (!instruction) { toast("Type a feedback instruction first.", "error"); return; }
+      withBusyButton(document.getElementById("refine-custom"), "...", () => withUiErrors(() => refineDraft(instruction)));
+    });
 
     async function loadScheduledRuns() {
       const res = await fetch("/api/scheduled-runs");
@@ -2187,6 +2249,7 @@ def refine_draft(payload: RefineRequest) -> Dict[str, Any]:
 
     format_hint = f" The draft is in the following format: {fconfig['intro']}" if fmt != "post" else ""
     prompt = f"""You are refining a LinkedIn draft. {persona_config['intro']}{format_hint} Apply the following instruction to the draft below, keeping the voice consistent with that persona. Return ONLY the revised draft text — no explanations, no markdown, no commentary.
+{_ANTI_AI_TELLS}
 {f'{chr(10)}{rules_block}{chr(10)}' if rules_block else ''}
 Instruction: {payload.instruction}
 
@@ -2205,6 +2268,55 @@ Current draft:
     if active_rules:
         style_profile.increment_applied([r["id"] for r in active_rules])
     return {"ok": True, "refined_draft": refined}
+
+
+@web_app.post("/api/learn-from-edit")
+def learn_from_edit(payload: LearnFromEditRequest) -> Dict[str, Any]:
+    """Compare the published draft against the original AI-generated draft.
+    If they differ, use the LLM to propose a concise style rule capturing what
+    the user changed. Returns the proposed rule for the user to confirm."""
+    versions = draft_store.get_versions(payload.thread_id)
+    author_drafts = [v for v in versions if v.get("source") == "author"]
+    if not author_drafts:
+        return {"ok": True, "proposed_rule": "", "changed": False}
+    original = author_drafts[-1].get("draft", "")
+    published = (payload.published_draft or "").strip()
+    if original.strip() == published:
+        return {"ok": True, "proposed_rule": "", "changed": False}
+
+    config = _config(payload.thread_id)
+    state = graph_app.get_state(config)
+    values = state.values if isinstance(state.values, dict) else {}
+    writer_provider = values.get("writer_provider", "ollama")
+    writer_model = values.get("writer_model")
+    writer_llm = _get_chat_model(writer_provider, role="refine", model_override=writer_model)
+
+    prompt = f"""You are a style assistant. The user edited a LinkedIn draft before publishing. Compare the original AI draft with the user's final version and extract ONE concise style rule that captures the most important pattern in what the user changed. The rule should be actionable and general (not specific to this one post). Return ONLY the rule text, no explanation.
+
+Examples of good rules:
+- "Never use the word 'leverage' — use 'use' instead"
+- "Start with the conclusion, not the setup"
+- "Keep paragraphs to 2-3 sentences max"
+- "Avoid em dashes; use periods"
+
+Original AI draft:
+{original[:2000]}
+
+User's final draft:
+{published[:2000]}"""
+
+    try:
+        response = writer_llm.invoke(prompt)
+        proposed_rule = str(response.content).strip()
+        input_tokens, output_tokens, estimated = _capture_usage(response, prompt, proposed_rule)
+        cost_tracker.log_usage(
+            payload.thread_id, "learn_edit", writer_provider, _resolve_model_name(writer_llm, writer_model),
+            input_tokens, output_tokens, estimated,
+        )
+    except Exception:
+        return {"ok": True, "proposed_rule": "", "changed": True}
+
+    return {"ok": True, "proposed_rule": proposed_rule, "changed": True}
 
 
 @web_app.get("/api/style-rules")

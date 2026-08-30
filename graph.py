@@ -39,6 +39,7 @@ from settings import (
     get_paywall_probe_max,
     get_rss_max_items_per_feed,
     get_scout_max_total_articles,
+    get_writer_examples,
 )
 
 
@@ -80,8 +81,19 @@ ANALYST_MAX_ARTICLES = 20
 ANALYST_MAX_PICKS = 20
 ANALYST_SUMMARY_MAX_CHARS = 260
 AUTHOR_SUMMARY_MAX_CHARS = 1600
+AUTHOR_BODY_MAX_CHARS = 8000
 DRAFT_REVIEW_ACTIONS = {"publish", "edit", "pick_another", "done"}
 DEFAULT_PERSONA = "cto_phd"
+
+# Anti-AI-tells: phrases and patterns that make text sound machine-generated.
+# These are injected into every writer prompt as hard constraints.
+_ANTI_AI_TELLS = """- Do NOT use these words or phrases: "delve", "navigate", "landscape", "realm", "tapestry", "robust", "seamless", "leverage", "synergy", "transformative", "game-changer", "paradigm shift", "it's important to note", "it's worth noting", "in today's world", "the promise is X, the reality is Y".
+- Do NOT use em dashes or semicolons. Use periods and commas.
+- Do NOT write symmetric bullet lists where every bullet starts with the same grammatical pattern. Vary the rhythm.
+- Do NOT hedge with "arguably", "perhaps", "it could be said". Take a position.
+- Do NOT open with a question like "Have you ever wondered..." or a greeting.
+- Write like you are talking to a peer over coffee, not delivering a keynote. Irregular sentence lengths. Let some sentences be short and blunt.
+- Do NOT end paragraphs with a neat summary sentence. Leave the thought hanging if that's more natural."""
 
 FORMATS: Dict[str, Dict[str, str]] = {
     "post": {
@@ -1396,32 +1408,52 @@ Draft:
         return ""
 
 
-def _build_author_prompt(article: Article, feedback: Optional[str], persona: str, style_rules_block: Optional[str] = None, fmt: str = "post") -> str:
+def _build_author_prompt(
+    article: Article,
+    feedback: Optional[str],
+    persona: str,
+    style_rules_block: Optional[str] = None,
+    fmt: str = "post",
+    article_body: str = "",
+) -> str:
     pconfig = PERSONAS.get(persona) or PERSONAS[DEFAULT_PERSONA]
     fconfig = FORMATS.get(fmt) or FORMATS[DEFAULT_FORMAT]
-    # post format: structure/example fall back to the persona's (byte-identical legacy output).
     structure = fconfig["structure"] or pconfig["structure"]
-    example = fconfig["example"] or pconfig["example"]
     constraints = fconfig["constraints"]
     rules_section = f"\n{style_rules_block}\n" if style_rules_block else ""
-    return f"""Write a LinkedIn post about the article below. {pconfig['intro']} {fconfig['intro']}
 
-VOICE:
+    # Few-shot examples of the user's actual writing (B).
+    examples = get_writer_examples()
+    examples_section = ""
+    if examples:
+        joined = "\n\n---\n\n".join(examples)
+        examples_section = f"\nHere are examples of how I actually write. Match this voice and rhythm, not a generic AI tone:\n\n{joined}\n"
+
+    # Article source material: prefer full body if fetched (E), fall back to summary.
+    source_text = (article_body or "").strip()
+    source_label = "Article body"
+    if not source_text:
+        source_text = (article.get("summary", "") or "")[:AUTHOR_SUMMARY_MAX_CHARS]
+        source_label = "Article summary"
+
+    return f"""{pconfig['intro']} {fconfig['intro']}
+
 {pconfig['voice']}
 
-STRUCTURE:
+Structure:
 {structure}
 
-CONSTRAINTS:
+Hard constraints:
 {constraints}
+{_ANTI_AI_TELLS}
 {rules_section}
-EXAMPLE OUTPUT:
-{example}
+{examples_section}
+Now write a LinkedIn {fmt} about this article. Sound like a real person, not an AI summarizer.
 
 Article title: {article.get('title', '')}
 Article url: {article.get('url', '')}
 Article published_at: {article.get('published_at', '')}
-Article summary: {(article.get('summary', '') or '')[:AUTHOR_SUMMARY_MAX_CHARS]}
+{source_label}: {source_text[:AUTHOR_BODY_MAX_CHARS]}
 Analyst relevance score: {article.get('relevance_score', 0.0)}
 Human feedback: {feedback or 'None'}"""
 
@@ -1457,7 +1489,17 @@ def author_node(state: AgentState) -> AgentState:
     active_rules = style_profile.get_active_rules(persona)
     rules_block = style_profile.active_rules_block(persona)
 
-    prompt = _build_author_prompt(article, feedback, persona, rules_block, fmt)
+    # Fetch the full article body for richer source material (E).
+    # Fail-open: if the fetch fails, the prompt falls back to the RSS summary.
+    article_body = ""
+    article_url = (article.get("url", "") or "").strip()
+    if article_url and _is_public_http_url(article_url):
+        try:
+            article_body = _http_fetch_text(article_url, timeout=10.0, max_bytes=200_000)
+        except Exception:
+            article_body = ""
+
+    prompt = _build_author_prompt(article, feedback, persona, rules_block, fmt, article_body)
 
     if tid:
         progress_tracker.clear_stream(tid)
