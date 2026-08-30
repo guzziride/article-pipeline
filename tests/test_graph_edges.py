@@ -287,6 +287,33 @@ class AuthorPersonaTests(unittest.TestCase):
         default_config = graph.PERSONAS[graph.DEFAULT_PERSONA]
         self.assertIn(default_config["voice"], prompt)
 
+    def test_prompt_includes_anti_ai_tells(self):
+        prompt = graph._build_author_prompt(self.ARTICLE, None, graph.DEFAULT_PERSONA)
+        self.assertIn("delve", prompt)
+        self.assertIn("Do NOT use em dashes", prompt)
+
+    def test_prompt_uses_article_body_when_provided(self):
+        body = "This is the full article body with much more detail than the summary."
+        prompt = graph._build_author_prompt(self.ARTICLE, None, graph.DEFAULT_PERSONA, article_body=body)
+        self.assertIn("Article body:", prompt)
+        self.assertIn(body, prompt)
+
+    def test_prompt_falls_back_to_summary_when_no_body(self):
+        prompt = graph._build_author_prompt(self.ARTICLE, None, graph.DEFAULT_PERSONA)
+        self.assertIn("Article summary:", prompt)
+        self.assertIn("Useful context", prompt)
+
+    def test_prompt_includes_writer_examples(self):
+        with patch.object(graph, "get_writer_examples", return_value=["My actual writing style. Blunt and direct."]):
+            prompt = graph._build_author_prompt(self.ARTICLE, None, graph.DEFAULT_PERSONA)
+        self.assertIn("how I actually write", prompt)
+        self.assertIn("My actual writing style", prompt)
+
+    def test_prompt_omits_examples_section_when_empty(self):
+        with patch.object(graph, "get_writer_examples", return_value=[]):
+            prompt = graph._build_author_prompt(self.ARTICLE, None, graph.DEFAULT_PERSONA)
+        self.assertNotIn("how I actually write", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

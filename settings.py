@@ -30,6 +30,8 @@ PAYWALL_PROBE_KEY = "PAYWALL_PROBE"
 PAYWALL_PROBE_FALLBACK = False
 PAYWALL_PROBE_MAX_KEY = "PAYWALL_PROBE_MAX"
 PAYWALL_PROBE_MAX_FALLBACK = 40
+WRITER_EXAMPLES_KEY = "WRITER_EXAMPLES"
+WRITER_EXAMPLES_FALLBACK = ""
 
 
 def get_default_topic() -> str:
@@ -127,6 +129,30 @@ def get_paywall_markers() -> list[str]:
     load_dotenv(override=True)
     raw = os.getenv(PAYWALL_MARKERS_KEY, PAYWALL_MARKERS_FALLBACK) or ""
     return [m.strip().lower() for m in raw.split(",") if m.strip()]
+
+
+def get_writer_examples() -> list[str]:
+    """Few-shot examples of the user's actual writing, injected into the author
+    prompt to match their voice instead of a generic AI voice. Set via
+    WRITER_EXAMPLES env var (newline-separated) or a file path prefixed with
+    'file:'."""
+    import os as _os
+    load_dotenv(override=True)
+    raw = os.getenv(WRITER_EXAMPLES_KEY, WRITER_EXAMPLES_FALLBACK) or ""
+    raw = raw.strip()
+    if not raw:
+        return []
+    if raw.startswith("file:"):
+        path = raw[5:].strip()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            return []
+    else:
+        content = raw
+    examples = [e.strip() for e in content.split("\n---\n") if e.strip()]
+    return examples
 
 
 DEFAULT_TOPIC = get_default_topic()
