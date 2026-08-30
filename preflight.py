@@ -55,11 +55,6 @@ def _check_env(analyst_provider: str, writer_provider: str) -> Tuple[List[str], 
     errors: List[str] = []
     warnings: List[str] = []
 
-    if not _present("TAVILY_API_KEY"):
-        warnings.append(
-            "TAVILY_API_KEY is missing (RSS routes still work; Tavily-routed domains will be skipped)."
-        )
-
     providers = {analyst_provider, writer_provider}
     if "gemini" in providers and not _present("GOOGLE_API_KEY"):
         errors.append("GOOGLE_API_KEY is missing (required for Gemini provider).")
@@ -79,7 +74,7 @@ def _check_env(analyst_provider: str, writer_provider: str) -> Tuple[List[str], 
     if not _present("OPENAI_MODEL"):
         warnings.append("OPENAI_MODEL not set; defaulting to gpt-4o")
     if not _present("GEMINI_MODEL"):
-        warnings.append("GEMINI_MODEL not set; defaulting to gemini-2.0-flash")
+        warnings.append("GEMINI_MODEL not set; defaulting to gemini-3.6-flash")
     if not _present("GROQ_MODEL"):
         warnings.append("GROQ_MODEL not set; defaulting to llama-3.1-8b-instant")
 
@@ -112,13 +107,13 @@ def main() -> None:
     parser.add_argument(
         "--analyst-provider",
         choices=["gemini", "openai", "ollama", "groq"],
-        default="gemini",
+        default="ollama",
         help="Planned provider for analyst node",
     )
     parser.add_argument(
         "--writer-provider",
         choices=["gemini", "openai", "ollama", "groq"],
-        default="openai",
+        default="ollama",
         help="Planned provider for writer node",
     )
     parser.add_argument(

@@ -14,7 +14,22 @@ RSS_MAX_ITEMS_PER_FEED_FALLBACK = 25
 SCOUT_MAX_TOTAL_ARTICLES_KEY = "SCOUT_MAX_TOTAL_ARTICLES"
 SCOUT_MAX_TOTAL_ARTICLES_FALLBACK = 80
 OLLAMA_MODEL_OPTIONS_KEY = "OLLAMA_MODEL_OPTIONS"
-OLLAMA_MODEL_OPTIONS_FALLBACK = "gemini-3-flash-preview:cloud,gemma4:31b-cloud,llama3.1,llama3.2"
+OLLAMA_MODEL_OPTIONS_FALLBACK = "deepseek-v4-flash:cloud,gemma4:31b-cloud,llama3.1,llama3.2"
+ENABLE_FACTUALITY_CHECK_KEY = "ENABLE_FACTUALITY_CHECK"
+ENABLE_FACTUALITY_CHECK_FALLBACK = True
+PAYWALLED_DOMAINS_KEY = "PAYWALLED_DOMAINS"
+PAYWALLED_DOMAINS_FALLBACK = "theinformation.com,thelogic.co"
+PAYWALL_MARKERS_KEY = "PAYWALL_MARKERS"
+PAYWALL_MARKERS_FALLBACK = (
+    "this post is for paid subscribers,for paid subscribers,subscriber-only,"
+    "subscribers only,members only,member-only story,subscribe to continue reading,"
+    "subscribe to read,create an account to continue reading,you have reached your article limit,"
+    "to continue reading, subscribe,premium content,sign in to read,register to read"
+)
+PAYWALL_PROBE_KEY = "PAYWALL_PROBE"
+PAYWALL_PROBE_FALLBACK = False
+PAYWALL_PROBE_MAX_KEY = "PAYWALL_PROBE_MAX"
+PAYWALL_PROBE_MAX_FALLBACK = 40
 
 
 def get_default_topic() -> str:
@@ -64,6 +79,54 @@ def get_ollama_model_options() -> list[str]:
     load_dotenv(override=True)
     raw = os.getenv(OLLAMA_MODEL_OPTIONS_KEY, OLLAMA_MODEL_OPTIONS_FALLBACK)
     return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def get_factuality_check_enabled() -> bool:
+    load_dotenv(override=True)
+    raw = (os.getenv(ENABLE_FACTUALITY_CHECK_KEY, str(ENABLE_FACTUALITY_CHECK_FALLBACK)) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def get_paywall_probe_enabled() -> bool:
+    """If true, scout fetches each surviving article and drops paywalled ones."""
+    load_dotenv(override=True)
+    raw = (os.getenv(PAYWALL_PROBE_KEY, str(PAYWALL_PROBE_FALLBACK)) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def get_paywall_probe_max() -> int:
+    """Maximum number of articles to probe for paywalls in a single scout run."""
+    load_dotenv(override=True)
+    raw = os.getenv(PAYWALL_PROBE_MAX_KEY, str(PAYWALL_PROBE_MAX_FALLBACK)) or ""
+    try:
+        value = int(raw)
+    except ValueError:
+        return PAYWALL_PROBE_MAX_FALLBACK
+    return max(0, value)
+
+
+def get_paywalled_domains() -> set[str]:
+    """Genuinely all-paywall, non-technical domains. Scout drops any article
+    originating from these before the analyst. Keep this small — never include
+    mixed-platform domains like medium.com or substack.com."""
+    load_dotenv(override=True)
+    raw = os.getenv(PAYWALLED_DOMAINS_KEY, PAYWALLED_DOMAINS_FALLBACK) or ""
+    domains: set[str] = set()
+    for part in raw.split(","):
+        value = (part or "").strip().lower()
+        if value.startswith("www."):
+            value = value[4:]
+        if value:
+            domains.add(value)
+    return domains
+
+
+def get_paywall_markers() -> list[str]:
+    """Substrings to scan title+summary for at RSS level (no fetch). Default
+    catches paid Substack/Medium posts and hard-paywall teasers."""
+    load_dotenv(override=True)
+    raw = os.getenv(PAYWALL_MARKERS_KEY, PAYWALL_MARKERS_FALLBACK) or ""
+    return [m.strip().lower() for m in raw.split(",") if m.strip()]
 
 
 DEFAULT_TOPIC = get_default_topic()
