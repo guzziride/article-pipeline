@@ -1,6 +1,6 @@
 # Processing Details: Article Pipeline
 
-This file reflects the current implementation as of 2026-08-18 (branch `fix/scheduler-cache-review`, commit `64810ce`), **plus** a large batch of further work from session `db626376` (2026-08-26) described in §15 below, **plus** Phase 5 from session `c3152374` (2026-08-29) described in §16 below — all of it fully implemented and live-verified but **not yet committed** (see `git status --short`; `SESSION_CONTINUITY.md`, `sessions/2026-08-26_db626376.md`, and `sessions/2026-08-29_c3152374.md` for the full handoff). Status: **PAUSED, not complete** — read §15 and §16 before assuming anything below is either finished or accurately reflects the git history. Sections 1-14 below describe the state as of commit `64810ce`; where §15 or §16's work changes something described in an earlier section, the later section is the authoritative, current version.
+This file reflects the current implementation as of 2026-08-30 (branch `main`, commit `9d2b714`). All prior work (Phases 1-5, sessions `db626376` and `c3152374`) is now **committed and merged to `main`** via PRs #1 and #2. §15 and §16 describe that prior work. §17 describes the writer-prompt improvements and hybrid paywall exclusion added in session `6830d7a1` (2026-08-30). Status: **PAUSED, not complete** — two files remain uncommitted (`docker-compose.yml` volume mount + `writer_examples.txt`). See `SESSION_CONTINUITY.md` and `sessions/2026-08-30_6830d7a1.md` for the full handoff. Sections 1-14 describe the state as of the original commit `64810ce`; where later sections change something described earlier, the later section is authoritative.
 
 ## 1) Purpose and Current Pipeline
 
@@ -516,3 +516,82 @@ Tests: `tests/test_dashboard.py` — 6 tests (cost aggregation, run rates + topi
 - **Dashboard Tier 2 (source attribution)**: deferred per user. See §16.3 above.
 - **LinkedIn API direct-publish**: not revisited this session. Still deferred from the prior session (user chose "skip for now"). Don't build without asking again.
 - **Nothing committed**: per the standing user preference, commits only happen when the user explicitly says "commit and push." That instruction didn't come this session. All Phase 5 work is in the working tree alongside the uncommitted Phases 1-4.
+
+---
+
+## 17) Writer Prompt Improvements + Hybrid Paywall Exclusion — session `6830d7a1` (2026-08-30)
+
+**Status: PAUSED / resume pending.** All work in this section is committed and merged to `main` (PRs #1 and #2). Two files remain uncommitted: `docker-compose.yml` (added volume mount for `writer_examples.txt`) and `writer_examples.txt` (user's personal content). See `sessions/2026-08-30_6830d7a1.md` for the full session log.
+
+### 17.1 UI fixes (PR #1, commit `9a69ff1`)
+
+- **Thread ID drop-down**: `cost_tracker.list_recent_threads(limit=10)` queries distinct `thread_id` from `usage` table ordered by most recent `ts`. `GET /api/threads` endpoint returns the list. UI input changed to `<input list="thread-options">` with a `<datalist>` populated on page load. Users can still type a new thread ID.
+- **Model default**: `graph.py` `_get_chat_model` ollama fallback changed from `os.getenv("OLLAMA_MODEL", "llama3.1")` to `os.getenv("OLLAMA_MODEL", "deepseek-v4-flash:cloud")`. UI placeholders updated to match.
+- **Live State JSON collapsed**: `<section class="card"><h2>Live State JSON</h2><pre>` changed to `<details><summary>...</summary><pre>` pattern, matching 3b Raw Articles. Collapsed by default.
+
+### 17.2 Hybrid paywall exclusion (PR #1, commit `9a69ff1`)
+
+Three env-configurable layers, all in `settings.py`:
+
+1. **`PAYWALLED_DOMAINS`** (default: `theinformation.com,thelogic.co`) — small domain blocklist for genuinely all-paywall, non-technical outlets. Checked in `_normalize_rss_entries` via `_extract_domain(url)` against the set. Drop reason: `paywall_domain`. Never includes mixed platforms like medium.com or substack.com (user explicitly rejected that approach).
+2. **`PAYWALL_MARKERS`** (default: 16 phrases) — substrings scanned case-insensitively against `title + "\n" + summary` at RSS level (no fetch). Catches paid Substack/Medium posts and paywall teasers. Drop reason: `paywall_marker`.
+3. **`PAYWALL_PROBE`** (default: `false`, opt-in) + `PAYWALL_PROBE_MAX` (default: `40`) — after dedup+sort, fetches up to N article bodies in parallel via `_http_fetch_text()` (reusing `_is_public_http_url` guard). Detects paywalls via HTTP 401/403, body markers (same `PAYWALL_MARKERS` list), and `<title>` hints. Fail-open: any fetch error keeps the article. Drop reason logged in `scout_debug.stats.paywall_dropped`.
+
+All three drop reasons surface in the scout audit and source stats. `scout_debug.stats` includes `paywall_blocked_domains`, `paywall_markers`, `paywall_probe_enabled`, `paywall_probe_max`, `paywall_probed`, `paywall_dropped`.
+
+Evolution: iteration 1 was domain-blocklist-only (too blunt, blocked medium/substack); iteration 2 was fetch-probe-only (user wanted to re-evaluate); iteration 3 is the hybrid (user chose after seeing all options). The fetch probe defaults OFF to keep the synchronous scout fast.
+
+New functions: `_http_fetch_text(url, timeout, max_bytes)`, `_is_paywalled_article(url) -> (bool, str)` in `graph.py`. New settings: `get_paywalled_domains()`, `get_paywall_markers()`, `get_paywall_probe_enabled()`, `get_paywall_probe_max()` in `settings.py`.
+
+### 17.3 Writer prompt improvements (PR #2, commit `6830d7a`)
+
+#### A — Rewritten prompt structure (`graph.py:1399`)
+`_build_author_prompt` signature now accepts `article_body: str = ""`. The prompt:
+- Collapsed labelled `VOICE:` / `STRUCTURE:` / `CONSTRAINTS:` / `EXAMPLE OUTPUT:` blocks into a flowing brief: persona intro + voice + structure + hard constraints.
+- Removed the synthetic persona `example` from the prompt (old code injected `pconfig["example"]` or `fconfig["example"]`). The examples made every post pattern-match one synthetic post's vocabulary/rhythm.
+- Added `_ANTI_AI_TELLS` constant (graph.py:86) — hard constraints banning: "delve", "navigate", "landscape", "realm", "tapestry", "robust", "seamless", "leverage", "synergy", "transformative", "game-changer", "paradigm shift", "it's important to note", "the promise is X, the reality is Y", em dashes, semicolons, symmetric bullet lists, hedging ("arguably", "perhaps"), greeting openers, neat summary sentence endings.
+- Also injected into the refine prompt in `ui.py` (imported `_ANTI_AI_TELLS` from graph).
+
+#### B — Few-shot from user's writing (`settings.py:135`, `graph.py:1431`)
+- `WRITER_EXAMPLES` env var: inline text (examples separated by `\n---\n`) or `file:/path/to/file`.
+- `get_writer_examples()` in `settings.py` reads the env var, handles `file:` prefix, splits on `\n---\n`.
+- In `_build_author_prompt`, if examples exist, injects: "Here are examples of how I actually write. Match this voice and rhythm, not a generic AI tone:" followed by the examples joined by `\n\n---\n\n`.
+- Empty by default. User configured `file:/app/writer_examples.txt` with 4 real posts, bind-mounted in Docker.
+
+#### C — Free-text feedback on draft (`ui.py:599`)
+- Added `<textarea id="custom-refine">` + "Refine with Feedback" button next to Quick Refine buttons.
+- Wires through existing `refineDraft(instruction)` → `POST /api/refine` (same path as the 5 fixed buttons). Anti-AI-tells applied via the refine prompt.
+
+#### D — Learn from manual edits (`ui.py:2228`, `ui.py:1464`)
+- `POST /api/learn-from-edit` (`LearnFromEditRequest`): takes `thread_id` + `published_draft`. Fetches last "author" version from `draft_store.get_versions()`, compares against published draft. If different, uses writer LLM to extract one concise style rule from the diff. Returns `{proposed_rule, changed}`.
+- UI: `approveDraft()` calls the endpoint after publish. If `changed` and `proposed_rule` exist, shows a toast offering one-click save as a style rule (source: `learned_from_edit`).
+- `offerLearnFromEdit(ruleText)` — toast with "Save rule" button, auto-dismisses after 12s.
+
+#### E — Article body fetch (`graph.py:1497`)
+- `author_node` now fetches the full article body before building the prompt:
+  ```python
+  if article_url and _is_public_http_url(article_url):
+      article_body = _http_fetch_text(article_url, timeout=10.0, max_bytes=200_000)
+  ```
+- Fail-open: on any exception, `article_body = ""`, prompt falls back to RSS summary.
+- `_build_author_prompt` uses `article_body` if available (label "Article body:"), otherwise falls back to `summary` (label "Article summary:"). Body truncated to `AUTHOR_BODY_MAX_CHARS = 8000`.
+
+### 17.4 Tests
+
+- Total: 63 tests, all passing.
+- New tests: 8 paywall tests (domain blocklist, marker detection, fetch probe — HTTP 403, body marker, free article, fetch error fail-open, non-public URL), 5 author prompt tests (anti-AI-tells present, article body used when provided, summary fallback, WRITER_EXAMPLES injection, examples omitted when empty).
+- Updated: `test_formats.py` — removed byte-identical-to-legacy test (prompt structure changed); updated format tests to check structure/constraints without the old `example` field.
+
+### 17.5 What's uncommitted
+
+```
+ M docker-compose.yml          — added: ./writer_examples.txt:/app/writer_examples.txt
+?? writer_examples.txt         — user's 4 real LinkedIn posts (personal content)
+```
+`docker-compose.yml` is safe to commit independently. `writer_examples.txt` contains personal writing — commit only with explicit user approval.
+
+### 17.6 Dead ends (don't retry)
+
+- Don't add medium.com or substack.com to `PAYWALLED_DOMAINS` — user explicitly rejected.
+- Don't put multi-line `WRITER_EXAMPLES` in `.env` for Docker — docker compose's parser fails with `key cannot contain a space`. Use `file:` prefix.
+- Don't re-inject synthetic persona examples into the writer prompt — they made output sound MORE AI.

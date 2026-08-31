@@ -14,4 +14,5 @@ services:
       - ./scheduled_runs.db:/app/scheduled_runs.db
       - ./costs.db:/app/costs.db
       - ./style_profile.db:/app/style_profile.db
+      - ./writer_examples.txt:/app/writer_examples.txt
     restart: always

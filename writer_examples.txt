@@ -1,0 +1,57 @@
+I pulled up a fresh DeepSeek model (DeepSeek V4 Flash 0731) from Ollama into Open WebUI, asked it a simple question, and accidentally triggered an existential crisis.
+
+Me: "What model are you?"
+DeepSeek: "𝘐'𝘮 𝘊𝘭𝘢𝘶𝘥𝘦, 𝘢𝘯 𝘈𝘐 𝘢𝘴𝘴𝘪𝘴𝘵𝘢𝘯𝘵 𝘣𝘶𝘪𝘭𝘵 𝘣𝘺 𝘈𝘯𝘵𝘩𝘳𝘰𝘱𝘪𝘤."
+Me: "Are you sure you're Claude??"
+DeepSeek: "𝘐 𝘪𝘥𝘦𝘯𝘵𝘪𝘧𝘺 𝘢𝘴 𝘊𝘭𝘢𝘶𝘥𝘦, 𝘣𝘶𝘪𝘭𝘵 𝘣𝘺 𝘈𝘯𝘵𝘩𝘳𝘰𝘱𝘪𝘤. 𝘐 𝘤𝘢𝘯'𝘵 𝘪𝘯𝘥𝘦𝘱𝘦𝘯𝘥𝘦𝘯𝘵𝘭𝘺 𝘷𝘦𝘳𝘪𝘧𝘺 𝘮𝘺 𝘰𝘸𝘯 𝘪𝘥𝘦𝘯𝘵𝘪𝘵𝘺 𝘧𝘳𝘰𝘮 𝘵𝘩𝘦 𝘰𝘶𝘵𝘴𝘪𝘥𝘦 𝘸𝘪𝘵𝘩 100% 𝘤𝘦𝘳𝘵𝘢𝘪𝘯𝘵𝘺..."
+
+I’m not judging (let’s be honest, almost every frontier LLM has “borrowed” proprietary data or scraped someone else's backyard at this point). But beyond the comedy of an open-weights model questioning its own existence, it’s a textbook live demo of what happens behind the scenes in modern LLM training:
+
+ - Distillation Artifacts: When teams distill knowledge from frontier teacher models (like Anthropic's Claude or OpenAI's GPT-4) down into smaller student architectures, the model doesn't just learn reasoning patterns, it inherits the teacher's persona and system quirks.
+ - Synthetic Data Contamination: If training pipelines don't scrub self-identification references thoroughly, the synthetic data loop creates identity leakage that slips right past alignment.
+ - Philosophical Hedging: Instead of checking its weights (which it can't do), the model treats its distilled training artifacts as ground truth and tries to logically rationalize the contradiction.
+
+As the distillation loop tightens across open-source and commercial ecosystems, we're going to see a lot more shared digital DNA, and accidental identity theft, in the wild.
+I'd be curious to hear if any of you have caught models having an identity crisis in your setup lately?
+
+---
+
+I know this is a couple of weeks old by now but it just showed up in my feed 😲 :
+https://lnkd.in/gJdTFBBK
+
+Read that again: Uber just torched their entire 2026 AI allocation on Anthropic's Claude Code in 𝘧𝘰𝘶𝘳 𝘮𝘰𝘯𝘵𝘩𝘴. Not a typo.
+
+Wait, aren’t we 𝘢𝘭𝘭 hitting our yearly Claude budget already? 😄
+
+The quote that stuck, from Uber's CTO: “figuring out if the company 𝘤𝘢𝘯 𝘢𝘧𝘧𝘰𝘳𝘥 𝘵𝘩𝘪𝘴 𝘭𝘦𝘷𝘦𝘭 𝘰𝘧 𝘱𝘳𝘰𝘥𝘶𝘤𝘵𝘪𝘷𝘪𝘵𝘺 at scale” (my italics). I always assumed AI productivity was an unqualified good. Now we’re asking: can we afford it? Is there such a thing as too much productivity? The ROI on output may not be what it was cracked up to be if cost scales faster than value.
+
+The lesson for me is that, as a CTOs, we need to keep these three tactical insights in mind:
+
+1. Budget AI as a variable cost, not a fixed license. Treat it like cloud compute: monitor burn rate weekly.
+2. Measure output value, not volume. More code isn’t better if it creates technical debt or requires disproportionate review.
+3. Implement cost gates per team. Let teams decide trade-offs between speed and budget because ownership drives discipline.
+
+When does productivity become a liability rather than an asset?
+
+---
+Spot on. Everyone talks about finding a co-founder with a "complementary skill set" (as if you are just assembling a Lego set), but nobody warns you that skills are irrelevant if your operating principles are in conflict.
+
+In my experience building teams from inception through multiple exits, I have learned that a co-founder relationship is more like a shared compass. If you are not calibrated to the same "True North" on how to treat people or solve problems, you will eventually find yourselves miles apart even if you started at the same desk
+
+If you are not aligned on:
+
+• How decisions get made when the data is messy
+• What the standard of excellence looks like under a deadline
+• Why you are actually in the room together in the first place
+
+...then even the most "perfect" technical match will eventually hit a wall.
+Culture is not just a ping-pong table or a set of slides. It is the invisible architecture that keeps the building standing when the wind picks up. If the shared values aren't there, the foundation will eventually crack.
+
+Great to discuss this on the Signal to Noise Podcast. It is a conversation every founder needs to have long before they sign the paperwork
+
+---
+Apparently, having made every mistake in the startup playbook across five companies qualifies me to give advice! ("Five-time founder" is mostly just a polite way of saying "slow learner with a very high tolerance for startup chaos.")
+
+In all seriousness, looking forward to sitting down with Lizzie Hnatiuk and whoever shows up on September 24. We’ll skip the generic buzzwords and talk about the real stuff: what actually happens when you build AI products, scale engineering teams, and navigate acquisitions without losing your sanity (<- although that ship has probably sailed on this last one).
+
+Bring your toughest questions (or just come to watch me squirm as I try to answer them in real time). Thanks Lizzie and Pender Ventures for organizing!
