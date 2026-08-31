@@ -2,7 +2,7 @@
 
 Use this file to resume quickly after context loss.
 
-> **Resume here:** work is **PAUSED, not complete**, as of session `6830d7a1` (2026-08-30). All prior feature work (Phases 1-5) is now **committed and merged to `main`** via PRs #1 and #2. The only uncommitted items are `docker-compose.yml` (added a volume mount for `writer_examples.txt`) and `writer_examples.txt` itself (user-created, contains personal writing — not yet committed). This session added: thread drop-down, deepseek-v4-flash:cloud model default, collapsed Live State JSON, hybrid paywall exclusion (domain blocklist + RSS markers + opt-in fetch probe), and five writer-prompt improvements (anti-AI-tells, few-shot examples, free-text feedback, learn-from-edit, article body fetch). See "## Writer Prompt + Paywall Exclusion — Current State" below for exactly where things stand, "## Session Ledger" for the full session history, and `sessions/2026-08-30_6830d7a1.md` for this session's log.
+> **Resume here:** all work as of session `6830d7a1` (2026-08-30) is **committed and pushed to `main`** (`bd27d5e`). Phases 1-5 were merged via PRs #1 and #2; follow-up commit `bd27d5e` added `writer_examples.txt` + its `docker-compose.yml` mount and the session docs (`SESSION_CONTINUITY.md`, `processing-details.md` §17, `sessions/2026-08-30_6830d7a1.md`). Working tree is clean. This session added: thread drop-down, deepseek-v4-flash:cloud model default, collapsed Live State JSON, hybrid paywall exclusion (domain blocklist + RSS markers + opt-in fetch probe), and five writer-prompt improvements (anti-AI-tells, few-shot examples, free-text feedback, learn-from-edit, article body fetch). See "## Writer Prompt + Paywall Exclusion — Current State" below, "## Session Ledger", and `sessions/2026-08-30_6830d7a1.md`.
 
 ## Session Ledger
 
@@ -11,22 +11,15 @@ Append-only — add one line per session, do not edit or reorder past entries.
 - 2026-08-17/18 | session (unrecorded, pre-ledger) | fix/scheduler-cache-review | worktree: /home/toufic/Source/article-pipeline | Deep audit + P0/P1/P2/P3 bug fixes, committed as `64810ce` | log: none (predates this ledger)
 - 2026-08-26 | session db626376 | fix/scheduler-cache-review | worktree: /home/toufic/Source/article-pipeline | Built & live-verified Phases 1-4 of the feature backlog (Docker mounts, toasts, cost tracking, draft versioning, personas, hashtags, pre-LLM prefilter, webhook trigger); all uncommitted; paused before Phase 5 | log: sessions/2026-08-26_db626376.md
 - 2026-08-29 | session c3152374 | fix/scheduler-cache-review | worktree: /home/toufic/Source/article-pipeline | Built & live-verified Phase 5 (persistent style profile, multi-format output post/thread/carousel, performance dashboard Tier 1); video_script dropped per user, Tier 2 source attribution deferred; all uncommitted; 50 tests pass | log: sessions/2026-08-29_c3152374.md
-- 2026-08-30 | session 6830d7a1 | main | worktree: /home/toufic/Source/article-pipeline | Committed & merged Phases 1-5 (PR #1, commit 1237c7a); added thread drop-down, deepseek-v4-flash:cloud model default, collapsed Live State JSON, hybrid paywall exclusion; added writer prompt improvements (anti-AI-tells, few-shot WRITER_EXAMPLES, free-text feedback, learn-from-edit, article body fetch) (PR #2, commit 6830d7a); 63 tests pass; docker-compose.yml + writer_examples.txt uncommitted | log: sessions/2026-08-30_6830d7a1.md
+- 2026-08-30 | session 6830d7a1 | main | worktree: /home/toufic/Source/article-pipeline | Committed & merged Phases 1-5 (PR #1, commit 1237c7a); added thread drop-down, deepseek-v4-flash:cloud model default, collapsed Live State JSON, hybrid paywall exclusion; added writer prompt improvements (anti-AI-tells, few-shot WRITER_EXAMPLES, free-text feedback, learn-from-edit, article body fetch) (PR #2, commit 6830d7a); 63 tests pass; follow-up commit bd27d5e (writer_examples.txt + mount + session docs) pushed to main — working tree clean | log: sessions/2026-08-30_6830d7a1.md
 
 ## Writer Prompt + Paywall Exclusion — Current State
 
-**PAUSED / resume pending.**
+**Committed and pushed to `main` (`bd27d5e`) — working tree clean.**
 
-All prior feature work (Phases 1-5) is committed and merged to `main`. This session added two batches of work (both merged via PRs #1 and #2), plus two uncommitted files.
+All prior feature work (Phases 1-5) was merged via PRs #1 and #2. Follow-up commit `bd27d5e` committed the remaining items (`writer_examples.txt` + its `docker-compose.yml` mount, `SESSION_CONTINUITY.md`, `processing-details.md` §17, `sessions/2026-08-30_6830d7a1.md`) and pushed to `main` per user instruction. No uncommitted files remain. Docker container is running with `writer_examples.txt` mounted at `/app/writer_examples.txt` (`WRITER_EXAMPLES=file:/app/writer_examples.txt` in `.env`).
 
-### Uncommitted right now
-```
- M docker-compose.yml          — added volume mount: ./writer_examples.txt:/app/writer_examples.txt
-?? writer_examples.txt         — user's 4 real LinkedIn posts for few-shot examples; personal content, not code
-```
-Neither is blocking — the Docker container is running with both mounted. `docker-compose.yml` is safe to commit independently. `writer_examples.txt` should only be committed with explicit user permission (contains personal writing).
-
-### What's live (merged to main)
+### What's live (on `main`)
 - **Thread ID drop-down**: `GET /api/threads` + datalist, 10 most recent threads from `costs.db`.
 - **Model default**: `deepseek-v4-flash:cloud` (was `llama3.1`).
 - **Live State JSON**: collapsed by default (`<details>`).
@@ -43,17 +36,16 @@ Neither is blocking — the Docker container is running with both mounted. `dock
 - Don't re-inject the old synthetic persona examples into the prompt — they made output sound MORE AI (model pattern-matched the example's structure).
 
 ### Open questions for the user
-- Whether to commit `writer_examples.txt` (personal content) and `docker-compose.yml`.
-- Whether to test the new writer prompt against a real article run and tune further.
+- Whether to test the new writer prompt against a real article run and tune further (primary motivation was "the content is very AI looking" — examples now active).
 
 - Worktree: /home/toufic/Source/article-pipeline
-- Next step: Commit `docker-compose.yml` (and `writer_examples.txt` if user approves), then test the new writer prompt with a real article run to evaluate output quality.
+- Next step: Run a real article through the pipeline with `WRITER_EXAMPLES` active and evaluate output quality; adjust paywall markers or style rules as needed.
 
 ## Feature Backlog (Phases 1-5) — COMPLETED
 
-**All 5 phases committed and merged to `main` via PRs #1 and #2.**
+**All 5 phases committed and pushed to `main` (PRs #1 and #2, plus follow-up `bd27d5e`). Working tree clean.**
 
-`FEATURE_BACKLOG_PLAN.md` (local, uncommitted, not in git) lays out 5 phases on top of `AUDIT_REPORT_2026-08-18.md`'s backlog. All five phases are fully implemented and live-verified but **not committed** — see `git status --short` for the exact file list. Nothing is broken; it's uncommitted because no one has said "commit and push" yet, not because it's incomplete or failing. Full test suite (50 tests) passes.
+`FEATURE_BACKLOG_PLAN.md` (local, uncommitted, not in git) laid out 5 phases on top of `AUDIT_REPORT_2026-08-18.md`'s backlog. All five phases are now fully implemented, live-verified, committed and pushed to `main`. Full test suite (63 tests) passes.
 
 Phases 1-4 (session `db626376`, 2026-08-26): Docker volume mounts for all 6 SQLite stores; toast notifications; LLM cost/token tracking; draft version history with click-to-restore; .txt/.md export; 3-persona voice switching; static hashtag-chip library; pre-LLM heuristic prefilter; secret-gated webhook trigger endpoint. Two live-only bugs fixed along the way (retired Gemini model default, analyst fallback-prompt schema mismatch) plus the `ui.py` backslash-escape hazard. Full detail in `sessions/2026-08-26_db626376.md`.
 
@@ -66,18 +58,18 @@ Not done: LinkedIn API direct-publish (Phase 4b) — user chose "skip for now" i
 
 Dead ends / standing warnings (don't re-derive): don't raise `PREFILTER_MIN_SUMMARY_CHARS` back toward 150 (live-verified wrong); don't default to `gemini-2.0-flash` (retired); don't add a naive `test_webhook.py` to the shared `discover` run (import-order DB contamination); `ui.py` backslash-escape hazard still applies. Full detail in both session logs.
 
-- Worktree: /home/toufic/Source/article-pipeline
-- Next step: The feature backlog is complete. The only open decisions are (a) whether/when to commit the working tree and open a PR for `fix/scheduler-cache-review` → `main` (now carries Phases 1-5 on top of `64810ce`, nothing ever merged), and (b) whether to revisit LinkedIn API direct-publish (still deferred, needs user OAuth consent an agent can't do alone). Neither is blocking — nothing is broken.
+- Worktree: /home/toufic/Source/article-pipeline — clean, on `main` (`bd27d5e`).
+- Next step: The feature backlog is complete and pushed. Remaining deferred items: (a) LinkedIn API direct-publish (needs user OAuth consent, agent can't do alone), (b) Dashboard Tier 2 source attribution (needs `source_domain` column). Neither is blocking — nothing is broken.
 
 ## Current Project State
 
 - Project: `article-pipeline`
-- Current branch: `main` (latest commit: `9d2b714` — Merge PR #2). All feature work is now on `main`.
-- Core workflow: `scout -> analyst -> approval(interrupt) -> author -> edit_approval(interrupt)`, now with scheduled runs *and* webhook-triggered runs feeding the same `approval` interrupt. Scout now includes hybrid paywall exclusion. Author now fetches article body and uses anti-AI-tells + optional few-shot examples.
+- Current branch: `main` (latest commit: `bd27d5e` — "Add writer_examples mount, session docs and §17 details", pushed to `origin/main`). Working tree clean.
+- Core workflow: `scout -> analyst -> approval(interrupt) -> author -> edit_approval(interrupt)`, now with scheduled runs *and* webhook-triggered runs feeding the same `approval` interrupt. Scout now includes hybrid paywall exclusion. Author now fetches article body and uses anti-AI-tells + optional few-shot examples from `writer_examples.txt`.
 - Checkpointing: `SqliteSaver` (`checkpoints.db`), **not** `MemorySaver` — survives restarts.
 - CLI + UI both support start/resume flows; UI now also has a scheduled-runs review panel, draft version history, persona switching, format switching (post/thread/carousel), a hashtag chip library, cost tracking, a style rules panel, a performance dashboard, a thread ID drop-down, custom feedback textarea, and learn-from-edit on publish.
 - Project is treated as a personal localhost tool, not a cloud/SaaS service.
-- Latest **commit**: `9d2b714` — "Merge pull request #2 from guzziride/improvement/writer-prompt". Two uncommitted files remain (`docker-compose.yml` volume mount + `writer_examples.txt`).
+- Latest **commit**: `bd27d5e` — "Add writer_examples mount, session docs and §17 details" (includes `writer_examples.txt` + mount + `SESSION_CONTINUITY.md` + `processing-details.md` §17 + `sessions/2026-08-30_6830d7a1.md`). Prior: `9d2b714` (Merge PR #2).
 
 ## What Happened This Session (2026-08-17 → 2026-08-18)
 
@@ -134,11 +126,10 @@ All 17 tests pass. Committed as `64810ce` and pushed to `origin/fix/scheduler-ca
 
 ## Open Items / Next Steps
 
-- **Commit `docker-compose.yml` + `writer_examples.txt`**: two uncommitted files from the writer-prompt session. `docker-compose.yml` is safe to commit independently. `writer_examples.txt` contains the user's personal LinkedIn posts — commit only with explicit user approval.
-- **Test the new writer prompt**: run a real article through the pipeline with `WRITER_EXAMPLES` active and evaluate whether the output sounds less AI. The user's primary motivation was "the content is very AI looking."
+- **Test the new writer prompt**: run a real article through the pipeline with `WRITER_EXAMPLES` active and evaluate whether the output sounds less AI. The user's primary motivation was "the content is very AI looking." (`writer_examples.txt` now committed as `bd27d5e`.)
 - **Dashboard Tier 2 (deferred)**: source-level attribution — needs `source_domain` added to `published_drafts`. Not blocking.
 - **LinkedIn API direct-publish**: still deferred from a prior session.
-- Full detail on all decisions and dead ends from this session is in `sessions/2026-08-30_6830d7a1.md`. Prior session detail: `sessions/2026-08-26_db626376.md` (Phases 1-4), `sessions/2026-08-29_c3152374.md` (Phase 5).
+- Full detail on all decisions and dead ends from this session is in `sessions/2026-08-30_6830d7a1.md`. Prior session detail: `sessions/2026-08-26_db626376.md` (Phases 1-4), `sessions/2026-08-29_c3152374.md` (Phase 5). Working tree is now clean on `main` (`bd27d5e`).
 
 ## Quick Resume Commands
 

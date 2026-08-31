@@ -1,6 +1,6 @@
 # Processing Details: Article Pipeline
 
-This file reflects the current implementation as of 2026-08-30 (branch `main`, commit `9d2b714`). All prior work (Phases 1-5, sessions `db626376` and `c3152374`) is now **committed and merged to `main`** via PRs #1 and #2. §15 and §16 describe that prior work. §17 describes the writer-prompt improvements and hybrid paywall exclusion added in session `6830d7a1` (2026-08-30). Status: **PAUSED, not complete** — two files remain uncommitted (`docker-compose.yml` volume mount + `writer_examples.txt`). See `SESSION_CONTINUITY.md` and `sessions/2026-08-30_6830d7a1.md` for the full handoff. Sections 1-14 describe the state as of the original commit `64810ce`; where later sections change something described earlier, the later section is authoritative.
+This file reflects the current implementation as of 2026-08-30 (branch `main`, commit `bd27d5e`, pushed to `origin/main`). All prior work (Phases 1-5, sessions `db626376` and `c3152374`) was **committed and merged to `main`** via PRs #1 and #2. §15 and §16 describe that prior work. §17 describes the writer-prompt improvements and hybrid paywall exclusion added in session `6830d7a1` (2026-08-30), now committed as `bd27d5e` (includes `writer_examples.txt` + mount + session docs). Working tree is clean. See `SESSION_CONTINUITY.md` and `sessions/2026-08-30_6830d7a1.md` for the full handoff. Sections 1-14 describe the state as of the original commit `64810ce`; where later sections change something described earlier, the later section is authoritative.
 
 ## 1) Purpose and Current Pipeline
 
@@ -521,7 +521,7 @@ Tests: `tests/test_dashboard.py` — 6 tests (cost aggregation, run rates + topi
 
 ## 17) Writer Prompt Improvements + Hybrid Paywall Exclusion — session `6830d7a1` (2026-08-30)
 
-**Status: PAUSED / resume pending.** All work in this section is committed and merged to `main` (PRs #1 and #2). Two files remain uncommitted: `docker-compose.yml` (added volume mount for `writer_examples.txt`) and `writer_examples.txt` (user's personal content). See `sessions/2026-08-30_6830d7a1.md` for the full session log.
+**Committed and pushed to `main` (`bd27d5e`).** All work in this section was merged via PRs #1 and #2; follow-up commit `bd27d5e` added `writer_examples.txt` + mount and the session docs. Working tree clean. See `sessions/2026-08-30_6830d7a1.md` for the full session log.
 
 ### 17.1 UI fixes (PR #1, commit `9a69ff1`)
 
@@ -582,13 +582,16 @@ New functions: `_http_fetch_text(url, timeout, max_bytes)`, `_is_paywalled_artic
 - New tests: 8 paywall tests (domain blocklist, marker detection, fetch probe — HTTP 403, body marker, free article, fetch error fail-open, non-public URL), 5 author prompt tests (anti-AI-tells present, article body used when provided, summary fallback, WRITER_EXAMPLES injection, examples omitted when empty).
 - Updated: `test_formats.py` — removed byte-identical-to-legacy test (prompt structure changed); updated format tests to check structure/constraints without the old `example` field.
 
-### 17.5 What's uncommitted
+### 17.5 Commit
+
+Both files committed and pushed as `bd27d5e` per user instruction at end of session `6830d7a1`:
 
 ```
- M docker-compose.yml          — added: ./writer_examples.txt:/app/writer_examples.txt
-?? writer_examples.txt         — user's 4 real LinkedIn posts (personal content)
+ docker-compose.yml          — added: ./writer_examples.txt:/app/writer_examples.txt
+ writer_examples.txt         — user's 4 real LinkedIn posts (personal content, now tracked)
 ```
-`docker-compose.yml` is safe to commit independently. `writer_examples.txt` contains personal writing — commit only with explicit user approval.
+
+`bd27d5e` also included `SESSION_CONTINUITY.md`, `processing-details.md` §17, and `sessions/2026-08-30_6830d7a1.md`. Working tree is now clean on `main`.
 
 ### 17.6 Dead ends (don't retry)
 
