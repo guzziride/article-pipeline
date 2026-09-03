@@ -1872,7 +1872,7 @@ __OLLAMA_OPTIONS__
     window.toggleStyleRule = toggleStyleRule;
     window.deleteStyleRule = deleteStyleRule;
 
-    document.getElementById("add-rule-btn").addEventListener("click", withUiErrors(addStyleRule));
+    document.getElementById("add-rule-btn").addEventListener("click", () => withUiErrors(addStyleRule));
     document.getElementById("new-style-rule").addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); withUiErrors(addStyleRule)(); }
     });

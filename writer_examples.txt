@@ -55,3 +55,29 @@ Apparently, having made every mistake in the startup playbook across five compan
 In all seriousness, looking forward to sitting down with Lizzie Hnatiuk and whoever shows up on September 24. We’ll skip the generic buzzwords and talk about the real stuff: what actually happens when you build AI products, scale engineering teams, and navigate acquisitions without losing your sanity (<- although that ship has probably sailed on this last one).
 
 Bring your toughest questions (or just come to watch me squirm as I try to answer them in real time). Thanks Lizzie and Pender Ventures for organizing!
+
+---
+
+We spent three days chasing a "network issue" that turned out to be a single span attribute being dropped at the ingest boundary. Not a fun three days.
+
+I'm not complaining about observability itself (I'm the guy who insists every service gets a dashboard on day one). I'm complaining that we've made collecting telemetry easy and acting on it hard. Here's what I keep seeing when teams "have observability":
+
+1. Traces that exist but no one reads. We capture everything, then page on one red metric and ignore the 40 spans that explain why. The data is there; the habit isn't.
+2. Dashboards built for the demo, not the incident. A pretty panel of p99 latency looks great until 2am, and it's the span-to-log correlation that actually finds the root cause.
+3. Alert fatigue as a culture. We tune thresholds until nothing fires, then lose incidents to noise. Silence becomes the false signal that everything is fine.
+
+The lesson for me is that observability is not a tooling problem, it's a discipline problem. You can't buy your way out of not reading the traces.
+When did you last find the actual root cause in a span that was there all along, not in the metric that woke you up?
+
+---
+
+I keep reading that quantum computers are five years away, and I keep wondering who keeps moving the goalposts.
+
+I don't run a quantum lab (my job is making sure our APIs don't fall over), but I'm paying attention because error correction is the part everyone skips and it's the whole ballgame:
+
+1. Physical qubits are the easy story. We can make them; the problem is they fall apart in microseconds. The headline count is marketing until the error rates are low enough to be useless.
+2. Logical qubits are the real metric. You need hundreds of physical qubits to make one reliable logical qubit, and that overhead is where the economics actually live.
+3. The practical win isn't a quantum advantage yet. It's that thinking in terms of error budgets is starting to leak into how we design fault-tolerant classical systems too.
+
+The honest takeaway for me is that "quantum" today is mostly an engineering funding story wearing a physics costume. The breakthrough will be boring: fewer errors, not more qubits.
+Are you optimizing for qubit count in your roadmap, or for the error rate no one wants to put in the slide deck?

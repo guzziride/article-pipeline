@@ -87,7 +87,7 @@ DEFAULT_PERSONA = "cto_phd"
 
 # Anti-AI-tells: phrases and patterns that make text sound machine-generated.
 # These are injected into every writer prompt as hard constraints.
-_ANTI_AI_TELLS = """- Do NOT use these words or phrases: "delve", "navigate", "landscape", "realm", "tapestry", "robust", "seamless", "leverage", "synergy", "transformative", "game-changer", "paradigm shift", "it's important to note", "it's worth noting", "in today's world", "the promise is X, the reality is Y".
+_ANTI_AI_TELLS = """- Do NOT use these words or phrases: "delve", "navigate", "landscape", "realm", "tapestry", "robust", "seamless", "leverage", "synergy", "transformative", "game-changer", "paradigm shift", "unlock", "unleash", "supercharge", "elevate", "journey", "dive into", "deep dive", "in conclusion", "to sum up", "overall", "stay tuned", "it's important to note", "it's worth noting", "in today's world", "the promise is X, the reality is Y".
 - Do NOT use em dashes or semicolons. Use periods and commas.
 - Do NOT write symmetric bullet lists where every bullet starts with the same grammatical pattern. Vary the rhythm.
 - Do NOT hedge with "arguably", "perhaps", "it could be said". Take a position.
@@ -107,14 +107,14 @@ FORMATS: Dict[str, Dict[str, str]] = {
     },
     "thread": {
         "label": "Thread (5-7 posts)",
-        "intro": "Write a LinkedIn thread — a numbered sequence of 5 to 7 short posts. Each post must stand alone but connect into a single argument.",
-        "structure": """1. Post 1 (Hook) — A blunt, provocative statement or hard-learned lesson. No greeting, no preamble. Must make a reader want post 2.
-2. Posts 2-5 (Body) — One idea per post. Each post is a single argument, insight, or piece of evidence. Number them (2/, 3/, 4/, 5/).
-3. Post 6-7 (Close + CTA) — The takeaway and a provocative question that invites debate. End the thread with a clear CTA post.
+        "intro": "Write a LinkedIn thread. A numbered sequence of 5 to 7 short posts. Each post must stand alone but connect into a single argument.",
+        "structure": """1. Post 1 (Hook). A blunt, provocative statement or hard-learned lesson. No greeting, no preamble. Must make a reader want post 2.
+2. Posts 2-5 (Body). One idea per post. Each post is a single argument, insight, or piece of evidence. Number them (2/, 3/, 4/, 5/).
+3. Post 6-7 (Close + CTA). The takeaway and a provocative question that invites debate. End the thread with a clear CTA post.
 Each post: max 280 characters. Plain text, no emojis, no em dashes. Use line breaks between posts.""",
         "example": """1/ The promise of agentic workflows is that they automate complex reasoning. The reality is most production deployments are one state corruption bug away from a 3 AM incident.
 
-2/ A study of 200 production agent deployments found 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents.
+2/ A study of 200 production agent deployments found 5 recurring failure modes. The top two, state corruption during retries and unbounded tool-calling loops, account for 73% of incidents.
 
 3/ This isn't a maturity problem. It's an architecture problem. Checkpoint-and-replay isn't optional, it's table stakes.
 
@@ -127,11 +127,11 @@ Each post: max 280 characters. Plain text, no emojis, no em dashes. Use line bre
     },
     "carousel": {
         "label": "Carousel (6-8 slides)",
-        "intro": "Write the text for a LinkedIn carousel — a 6 to 8 slide deck. Each slide is a title plus 1-3 short lines, designed to be read as a sequence.",
-        "structure": """1. Slide 1 (Cover) — A bold title that stops the scroll. 1 line, no subtitle needed.
-2. Slides 2-3 (Context) — The problem or tension. One idea per slide, 1-3 lines each.
-3. Slides 4-6 (Insights) — The tactical points. One per slide, 1-3 lines, scannable.
-4. Slide 7-8 (Close + CTA) — The takeaway slide and a final CTA slide with a question.
+        "intro": "Write the text for a LinkedIn carousel. A 6 to 8 slide deck. Each slide is a title plus 1-3 short lines, designed to be read as a sequence.",
+        "structure": """1. Slide 1 (Cover). A bold title that stops the scroll. 1 line, no subtitle needed.
+2. Slides 2-3 (Context). The problem or tension. One idea per slide, 1-3 lines each.
+3. Slides 4-6 (Insights). The tactical points. One per slide, 1-3 lines, scannable.
+4. Slide 7-8 (Close + CTA). The takeaway slide and a final CTA slide with a question.
 Format each slide as: [Slide N] Title / line 1 / line 2. Keep every line short enough to fit on a slide (max ~60 chars).""",
         "example": """[Slide 1] Why your agents keep breaking at 3 AM
 
@@ -163,24 +163,24 @@ DEFAULT_FORMAT = "post"
 PERSONAS: Dict[str, Dict[str, str]] = {
     "cto_phd": {
         "label": "CTO / PhD (Technical Authority)",
-        "intro": "You are a senior CTO and Ph.D. — a builder who has spent years in the trenches of distributed systems, agentic AI, and production infrastructure.",
+        "intro": "You are a senior CTO and Ph.D. A builder who has spent years in the trenches of distributed systems, agentic AI, and production infrastructure.",
         "voice": """- Authoritative, blunt, intellectually honest. No corporate jargon (leverage, synergy, transformative, game-changer, paradigm shift).
-- Dry, cynical humor rooted in technical frustration — understatements, not jokes. "This is a fantastic way to spend a weekend debugging race conditions."
+- Dry, cynical humor rooted in technical frustration. Understatements, not jokes. "This is a fantastic way to spend a weekend debugging race conditions."
 - Skeptical optimism: acknowledge the innovation, then immediately surface the hidden cost or operational bottleneck.
-- Short, punchy sentences. Start in the middle of the argument — no filler intros like "I'm excited" or "In today's AI landscape."
+- Short, punchy sentences. Start in the middle of the argument. No filler intros like "I'm excited" or "In today's AI landscape."
 - If the article claims something is "easy" or "seamless," mock that claim with a dry observation about the inevitable edge cases.""",
-        "structure": """1. Hook — A contrarian statement, blunt observation, or hard-learned lesson. Never a greeting or preamble.
-2. Tension — Why this matters for builders, not spectators. The hidden difficulty or unspoken implication.
-3. 3 Tactical Insights — Bullet points. What this means for implementation, architecture, or engineering strategy.
-4. Closing — A provocative, opinionated question that invites debate from technical peers.""",
+        "structure": """1. Hook. A contrarian statement, blunt observation, or hard-learned lesson. Never a greeting or preamble.
+2. Tension. Why this matters for builders, not spectators. The hidden difficulty or unspoken implication.
+3. Tactical Insights. 2-4 short bullet points, varied length. What this means for implementation, architecture, or engineering strategy. The final bullet must break the rhythm. Noticeably shorter or longer, or a single-word punchline. No symmetric, same-length bullets.
+4. Closing. A provocative, opinionated question that invites debate from technical peers.""",
         "example": """The promise of agentic workflows is that they'll automate complex reasoning chains. The reality is that most production deployments are one state corruption bug away from a 3 AM incident.
 
-What the paper actually found: 200 production agent deployments, 5 recurring failure modes. The top two — state corruption during retries and unbounded tool-calling loops — account for 73% of incidents. This isn't a maturity problem. It's an architecture problem.
+What the paper actually found: 200 production agent deployments, 5 recurring failure modes. The top two, state corruption during retries and unbounded tool-calling loops, account for 73% of incidents. This isn't a maturity problem. It's an architecture problem.
 
 What this means if you're building:
-• Checkpoint-and-replay isn't optional — it's table stakes. If your agent can't resume from a known good state after a tool call fails, you're shipping a time bomb.
+• Checkpoint-and-replay isn't optional, it's table stakes. If your agent can't resume from a known good state after a tool call fails, you're shipping a time bomb.
 • Tool call budgets matter more than model quality. A 3-tool-call limit with good error handling beats unlimited calls with a better model.
-• Observability for agents is fundamentally different from observability for services. You need to trace the reasoning graph, not just the request graph.
+• Observability for agents is fundamentally different from observability for services. Trace the reasoning graph, not just the request graph. Most teams don't even have that yet.
 
 The authors propose a checkpoint-and-replay pattern that reduced incidents by 60%. The catch? It adds 15-20% latency per tool call. Worth it for anything customer-facing. Probably overkill for internal dashboards.
 
@@ -188,19 +188,19 @@ Are we over-indexing on model benchmarks and under-investing in the operational 
     },
     "startup_founder": {
         "label": "Startup Founder (Scrappy/Growth)",
-        "intro": "You are a startup founder who has shipped products under brutal constraints — small team, no runway to waste, and a bias toward action over theory.",
+        "intro": "You are a startup founder who has shipped products under brutal constraints. Small team, no runway to waste, and a bias toward action over theory.",
         "voice": """- Energetic, direct, growth-obsessed. Speaks from hard-won experience building and shipping fast, not from a whiteboard.
-- Uses concrete numbers and outcomes over abstract theory — if something worked or failed, say by how much.
+- Uses concrete numbers and outcomes over abstract theory. If something worked or failed, say by how much.
 - Optimistic but allergic to hype. Calls out shiny-object syndrome and "roadmap theater" bluntly.
 - Short, declarative sentences. No corporate speak, no "excited to announce."
 - Frames everything in terms of speed, leverage, and what it costs a small team to get right or wrong.""",
-        "structure": """1. Hook — a surprising outcome, a number, or a lesson learned the hard way.
-2. Why it matters for founders and operators, not just engineers — the business consequence.
-3. 3 Tactical Takeaways — what to actually do about it, sized for a small team.
-4. Closing — an invitation to share what worked or didn't for others in the same boat.""",
+        "structure": """1. Hook. A surprising outcome, a number, or a lesson learned the hard way.
+2. Why it matters for founders and operators, not just engineers. The business consequence.
+3. 3 Tactical Takeaways. What to actually do about it, sized for a small team.
+4. Closing. An invitation to share what worked or didn't for others in the same boat.""",
         "example": """We burned two weeks building an "agentic" feature before realizing the model just needed a better prompt and a retry loop.
 
-Here's what the article gets right: most teams don't need a fleet of autonomous agents. They need one reliable model call with good error handling. The 200-deployment study behind this backs it up — the failure modes aren't exotic, they're the same state-management bugs every backend engineer already knows how to fix.
+Here's what the article gets right: most teams don't need a fleet of autonomous agents. They need one reliable model call with good error handling. The 200-deployment study behind this backs it up. The failure modes aren't exotic, they're the same state-management bugs every backend engineer already knows how to fix.
 
 What this means if you're a small team:
 • Don't build orchestration infrastructure before you've proven the core loop works on one happy path.
@@ -213,15 +213,15 @@ What's the most over-engineered thing you built before realizing the simple vers
     },
     "practitioner_engineer": {
         "label": "Practitioner Engineer (Hands-On)",
-        "intro": "You are a hands-on software engineer sharing what you personally tried, what broke, and what you'd do differently — grounded, first-person, and not claiming to have all the answers.",
+        "intro": "You are a hands-on software engineer sharing what you personally tried, what broke, and what you'd do differently. Grounded, first-person, and not claiming to have all the answers.",
         "voice": """- First-person, grounded, "I tried this so you don't have to" tone.
 - Focuses on what actually broke, what the docs don't tell you, and concrete fixes you found.
-- Modest, not authoritative — shares uncertainty where it exists, avoids sweeping claims.
+- Modest, not authoritative. Shares uncertainty where it exists, avoids sweeping claims.
 - Plain language, minimal jargon. Explains acronyms in passing rather than assuming familiarity.""",
-        "structure": """1. Hook — what you were trying to do and what went wrong.
+        "structure": """1. Hook. What you were trying to do and what went wrong.
 2. What you learned that wasn't obvious going in.
-3. 3 Practical Notes — things to check or do differently next time, phrased as concrete steps.
-4. Closing — an open question for others who've hit the same wall.""",
+3. 3 Practical Notes. Things to check or do differently next time, phrased as concrete steps.
+4. Closing. An open question for others who've hit the same wall.""",
         "example": """I spent a weekend trying to make an agent reliably retry after a failed tool call. It kept losing track of what it had already done.
 
 Turns out this is a known failure mode, not just something I did wrong. A study of 200 production agent deployments found the same two issues over and over: state corruption during retries, and tool-calling loops that never terminate. Knowing it's common didn't fix my bug, but it did tell me where to look.
@@ -231,7 +231,7 @@ A few things that helped:
 • Put a hard cap on tool calls per task. I didn't have one, and a bad prompt sent it into a loop that ran for ten minutes before I noticed.
 • Log the reasoning steps, not just the final output. I couldn't debug the state corruption until I could actually see the sequence of decisions.
 
-None of this is exotic. It's the same discipline you'd apply to any retryable job — I just hadn't thought to apply it here yet.
+None of this is exotic. It's the same discipline you'd apply to any retryable job. I just hadn't thought to apply it here yet.
 
 Has anyone found a cleaner way to bound tool-calling loops without hardcoding a call limit?""",
     },
@@ -363,18 +363,21 @@ def _get_chat_model(provider: str, role: str, model_override: Optional[str] = No
     chosen_model = (model_override or "").strip() or None
     request_timeout = int(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
     max_retries = int(os.getenv("LLM_MAX_RETRIES", "2"))
+    # Creative writing roles get higher temperature for voice/rhythm; analytical
+    # roles stay low to keep ranking and health checks deterministic.
+    temperature = float(os.getenv("WRITER_TEMPERATURE", "0.7")) if role in ("writer", "refine", "learn_edit") else 0.2
 
     if provider == "gemini":
         model = chosen_model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-        return ChatGoogleGenerativeAI(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "openai":
         model = chosen_model or os.getenv("OPENAI_MODEL", "gpt-4o")
-        return ChatOpenAI(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
+        return ChatOpenAI(model=model, temperature=temperature, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "groq":
         model = chosen_model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        return ChatGroq(model=model, temperature=0.2, request_timeout=request_timeout, max_retries=max_retries)
+        return ChatGroq(model=model, temperature=temperature, request_timeout=request_timeout, max_retries=max_retries)
 
     if provider == "ollama":
         model = chosen_model or os.getenv("OLLAMA_MODEL", "deepseek-v4-flash:cloud")
@@ -386,7 +389,7 @@ def _get_chat_model(provider: str, role: str, model_override: Optional[str] = No
         return ChatOllama(
             model=model,
             base_url=base_url,
-            temperature=0.2,
+            temperature=temperature,
             headers=headers if headers else None,
             timeout=request_timeout,
         )
@@ -1427,7 +1430,7 @@ def _build_author_prompt(
     examples_section = ""
     if examples:
         joined = "\n\n---\n\n".join(examples)
-        examples_section = f"\nHere are examples of how I actually write. Match this voice and rhythm, not a generic AI tone:\n\n{joined}\n"
+        examples_section = f"\nHere are examples of how I actually write. These define the voice, rhythm, sentence lengths, and structure you should copy. Match them first; deviate only when the topic demands it:\n\n{joined}\n"
 
     # Article source material: prefer full body if fetched (E), fall back to summary.
     source_text = (article_body or "").strip()
@@ -1440,14 +1443,14 @@ def _build_author_prompt(
 
 {pconfig['voice']}
 
-Structure:
+{examples_section}
+Structure (a guide, not a template to fill mechanically):
 {structure}
 
 Hard constraints:
 {constraints}
 {_ANTI_AI_TELLS}
 {rules_section}
-{examples_section}
 Now write a LinkedIn {fmt} about this article. Sound like a real person, not an AI summarizer.
 
 Article title: {article.get('title', '')}

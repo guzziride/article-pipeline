@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 
 TOPIC_ENV_KEY = "ARTICLE_PIPELINE_DEFAULT_TOPIC"
-TOPIC_FALLBACK = "latest tech news on MCP, agentic workflows, and SaaS AI infrastructure"
+TOPIC_FALLBACK = "latest tech news on MCP, agentic workflows, SaaS AI infrastructure, observability, and quantum computing"
 MAX_ARTICLE_AGE_DAYS_KEY = "MAX_ARTICLE_AGE_DAYS"
 MAX_ARTICLE_AGE_DAYS_FALLBACK = 14
 ALLOW_UNDATED_ARTICLES_KEY = "ALLOW_UNDATED_ARTICLES"

@@ -66,6 +66,7 @@ All variables are defined in `.env` (copy `.env.example` to start). Descriptions
 | `OLLAMA_MODEL` | `llama3.1` | Default model name used when `ollama` is selected and no per-run model override is specified. |
 | `OLLAMA_API_KEY` | *(empty)* | API key for cloud-hosted Ollama providers. Leave empty for local Ollama (no auth). |
 | `OLLAMA_MODEL_OPTIONS` | `gemini-3-flash-preview:cloud,gemma4:31b-cloud,llama3.1,llama3.2` | Comma-separated list of model names that populate the UI's model dropdown/datalist for Ollama. Used to offer quick-select options in the analyst/writer model fields. |
+| `WRITER_TEMPERATURE` | `0.7` | Sampling temperature for creative roles (`writer`, `refine`, `learn_edit`). Analyst and health checks stay at `0.2` for deterministic ranking. |
 
 ## Scheduler
 
