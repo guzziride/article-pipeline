@@ -275,6 +275,27 @@ Persistent, plain-text preferences that are injected into every draft and refine
 - **Promote-on-refine**: after any Quick Refine, a 6-second toast offers one-click "Save as style rule" — a convenient way to turn a one-off instruction into a permanent rule.
 - Rules are **advisory** — the LLM may deviate. There is no automatic quality scoring; curation is deliberate and manual.
 
+### Default rules
+
+A starter set of rules ships with the repo. They are stored in `style_profile.db` (gitignored), so on a fresh clone run the seed script to restore them:
+
+```bash
+python seed_style_rules.py
+# or in the container:
+docker compose exec -T article-pipeline python seed_style_rules.py
+```
+
+The script is idempotent — it only adds rules that aren't already present. The defaults (all scoped to `*`):
+
+- Keep the first sentence under 12 words; lead with a concrete fact, quote, or number, not a setup.
+- No em-dashes at all. Use periods or commas instead.
+- No buzzwords: never use delve, unlock, tapestry, robust, leverage, or game-changer.
+- Include one first-person anecdote in parentheses for human voice.
+- End with one specific debate question, not a summary sentence.
+- Make it sound human, not like AI: add personalization, opinions, and rough edges.
+
+Edit `DEFAULT_RULES` in `seed_style_rules.py` to change the shipped set.
+
 ---
 
 ## 11) Scheduled runs
